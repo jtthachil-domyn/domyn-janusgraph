@@ -114,6 +114,23 @@
             <version>${project.version}</version>
         </dependency>
 
+        <!-- DomynGraph Engine modules -->
+        <dependency>
+            <groupId>org.janusgraph</groupId>
+            <artifactId>domyngraph-procedures</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.janusgraph</groupId>
+            <artifactId>domyngraph-algorithms</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.janusgraph</groupId>
+            <artifactId>domyngraph-tenant</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+
         <!-- Jackson 2.x -->
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>

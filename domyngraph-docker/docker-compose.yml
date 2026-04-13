@@ -1,0 +1,69 @@
+version: '3.8'
+
+services:
+
+  cassandra:
+    image: cassandra:4.1
+    container_name: domyn-cassandra
+    environment:
+      - MAX_HEAP_SIZE=2G
+      - HEAP_NEWSIZE=512M
+    ports:
+      - "9042:9042"
+    volumes:
+      - cassandra-data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'describe cluster'"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    networks:
+      - domyn-net
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.12.0
+    container_name: domyn-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    ports:
+      - "9200:9200"
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - domyn-net
+
+  janusgraph:
+    image: janusgraph/janusgraph:1.0.0
+    container_name: domyn-janusgraph
+    ports:
+      - "8182:8182"
+    volumes:
+      - ./config/janusgraph-cql-es.properties:/etc/opt/janusgraph/janusgraph.properties
+      - ./config/gremlin-server-domyngraph.yaml:/etc/opt/janusgraph/gremlin-server.yaml
+      - ./scripts:/opt/janusgraph/scripts
+    depends_on:
+      cassandra:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      - JAVA_OPTIONS=-Xms1G -Xmx2G
+    networks:
+      - domyn-net
+
+volumes:
+  cassandra-data:
+  es-data:
+
+networks:
+  domyn-net:
+    driver: bridge

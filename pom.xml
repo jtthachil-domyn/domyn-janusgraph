@@ -144,6 +144,10 @@
         <module>janusgraph-examples</module>
         <module>janusgraph-mixed-index-utils</module>
         <module>janusgraph-scylla</module>
+        <!-- DomynGraph Engine modules -->
+        <module>domyngraph-procedures</module>
+        <module>domyngraph-algorithms</module>
+        <module>domyngraph-tenant</module>
     </modules>
     <repositories>
         <repository>
