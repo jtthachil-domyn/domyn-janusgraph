@@ -68,7 +68,7 @@ public class DomynShortestDistanceVertexProgram extends StaticVertexProgram<Long
         maxDepth = configuration.getInt(MAX_DEPTH, 10);
         seed = configuration.getLong(SEED);
         weightProperty = configuration.getString(WEIGHT_PROPERTY, "weight");
-        incidentMessageScope = MessageScope.Local.of(__::inE,
+        incidentMessageScope = MessageScope.Local.of(__::bothE,
                 (msg, edge) -> {
                     Number w = edge.property(weightProperty).isPresent()
                             ? edge.<Number>value(weightProperty) : 1;

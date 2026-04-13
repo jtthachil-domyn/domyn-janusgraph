@@ -73,21 +73,12 @@ public class PathProcedures implements DomynProcedure {
     public static List<Path> kHop(GraphTraversalSource g, String name, int hops,
                                    String edgeLabel, int maxPaths, String tenantId) {
         GraphTraversal<Vertex, Vertex> start = tenantFilteredV(g, tenantId).has("name", name);
-        if (edgeLabel != null && !edgeLabel.isEmpty()) {
-            return start
-                    .repeat(__.both(edgeLabel).simplePath())
-                    .times(hops)
-                    .path()
-                    .limit(maxPaths)
-                    .toList();
-        } else {
-            return start
-                    .repeat(__.both().simplePath())
-                    .times(hops)
-                    .path()
-                    .limit(maxPaths)
-                    .toList();
-        }
+        return start
+                .repeat(hopStep(edgeLabel, tenantId).simplePath())
+                .times(hops)
+                .path()
+                .limit(maxPaths)
+                .toList();
     }
 
     public static List<Path> kHop(GraphTraversalSource g, String name, int hops,
@@ -98,7 +89,7 @@ public class PathProcedures implements DomynProcedure {
     public static List<Path> shortestPath(GraphTraversalSource g, String fromName,
                                            String toName, int maxDepth, String tenantId) {
         return tenantFilteredV(g, tenantId).has("name", fromName)
-                .repeat(__.both().simplePath())
+                .repeat(hopStep(null, tenantId).simplePath())
                 .until(__.has("name", toName).or().loops().is(maxDepth))
                 .has("name", toName)
                 .path()
@@ -114,7 +105,7 @@ public class PathProcedures implements DomynProcedure {
     public static List<Map<String, Object>> neighbors(GraphTraversalSource g, String name,
                                                         int depth, String tenantId) {
         return tenantFilteredV(g, tenantId).has("name", name)
-                .repeat(__.both().simplePath())
+                .repeat(hopStep(null, tenantId).simplePath())
                 .times(depth)
                 .dedup()
                 .valueMap(true)
@@ -127,6 +118,25 @@ public class PathProcedures implements DomynProcedure {
     public static List<Map<String, Object>> neighbors(GraphTraversalSource g, String name,
                                                         int depth) {
         return neighbors(g, name, depth, null);
+    }
+
+    /**
+     * Builds the per-hop traversal step. When tenantId is set, each hop
+     * filters the destination vertex by tenant_id, preventing traversal
+     * across tenant boundaries via cross-tenant edges.
+     */
+    @SuppressWarnings("unchecked")
+    private static GraphTraversal<Vertex, Vertex> hopStep(String edgeLabel, String tenantId) {
+        GraphTraversal<Vertex, Vertex> hop;
+        if (edgeLabel != null && !edgeLabel.isEmpty()) {
+            hop = __.<Vertex>both(edgeLabel);
+        } else {
+            hop = __.<Vertex>both();
+        }
+        if (tenantId != null && !tenantId.isEmpty()) {
+            hop = hop.has("tenant_id", tenantId);
+        }
+        return hop;
     }
 
     private static GraphTraversal<Vertex, Vertex> tenantFilteredV(

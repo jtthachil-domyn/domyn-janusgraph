@@ -55,8 +55,8 @@ services:
 
   janusgraph:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: domyngraph-docker/Dockerfile
     image: domyngraph:latest
     container_name: domyn-janusgraph
     ports:

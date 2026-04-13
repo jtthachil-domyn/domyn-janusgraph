@@ -12,6 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM janusgraph/janusgraph:latest
+# --- Build stage: compile DomynGraph modules from source ---
+FROM maven:3.9-eclipse-temurin-11 AS build
+WORKDIR /src
+COPY . .
+RUN mvn package -pl domyngraph-procedures,domyngraph-algorithms,domyngraph-tenant -am \
+    -DskipTests -Drat.skip=true -Dcheckstyle.skip=true \
+    -Denforcer.skip=true -Dcyclonedx.skip=true -q
 
-COPY lib/*.jar /opt/janusgraph/lib/
+# --- Runtime: pinned JanusGraph 1.1.0 ---
+FROM janusgraph/janusgraph:1.1.0
+
+COPY --from=build /src/domyngraph-procedures/target/domyngraph-procedures-*.jar /opt/janusgraph/lib/
+COPY --from=build /src/domyngraph-algorithms/target/domyngraph-algorithms-*.jar /opt/janusgraph/lib/
+COPY --from=build /src/domyngraph-tenant/target/domyngraph-tenant-*.jar /opt/janusgraph/lib/
