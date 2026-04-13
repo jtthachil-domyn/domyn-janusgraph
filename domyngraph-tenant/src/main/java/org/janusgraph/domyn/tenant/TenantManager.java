@@ -14,7 +14,6 @@
 
 package org.janusgraph.domyn.tenant;
 
-import org.apache.tinkerpop.gremlin.process.traversal.dsl.graph.GraphTraversalSource;
 import org.janusgraph.core.ConfiguredGraphFactory;
 import org.janusgraph.core.JanusGraph;
 import org.janusgraph.core.JanusGraphFactory;
@@ -105,13 +104,9 @@ public class TenantManager {
         return graph;
     }
 
-    public GraphTraversalSource traversal(String tenantId) {
+    public TenantAwareTraversalSource traversal(String tenantId) {
         JanusGraph graph = openTenant(tenantId);
-
-        if (strategy == TenantIsolationStrategy.SHARED_GRAPH) {
-            return TenantAwareTraversalSource.create(graph, tenantId);
-        }
-        return graph.traversal();
+        return TenantAwareTraversalSource.create(graph, tenantId);
     }
 
     public void closeTenant(String tenantId) {

@@ -15,6 +15,7 @@
 package org.janusgraph.domyn.procedures;
 
 import org.apache.tinkerpop.gremlin.process.traversal.Path;
+import org.apache.tinkerpop.gremlin.process.traversal.dsl.graph.GraphTraversal;
 import org.apache.tinkerpop.gremlin.process.traversal.dsl.graph.GraphTraversalSource;
 import org.apache.tinkerpop.gremlin.process.traversal.dsl.graph.__;
 import org.apache.tinkerpop.gremlin.structure.Vertex;
@@ -66,20 +67,21 @@ public class PathProcedures implements DomynProcedure {
             throw new IllegalArgumentException("'hops' must be between 1 and 10");
         }
 
-        return kHop(ctx.traversal(), name, hops, edgeLabel, maxPaths);
+        return kHop(ctx.traversal(), name, hops, edgeLabel, maxPaths, ctx.getTenantId());
     }
 
     public static List<Path> kHop(GraphTraversalSource g, String name, int hops,
-                                   String edgeLabel, int maxPaths) {
+                                   String edgeLabel, int maxPaths, String tenantId) {
+        GraphTraversal<Vertex, Vertex> start = tenantFilteredV(g, tenantId).has("name", name);
         if (edgeLabel != null && !edgeLabel.isEmpty()) {
-            return g.V().has("name", name)
+            return start
                     .repeat(__.both(edgeLabel).simplePath())
                     .times(hops)
                     .path()
                     .limit(maxPaths)
                     .toList();
         } else {
-            return g.V().has("name", name)
+            return start
                     .repeat(__.both().simplePath())
                     .times(hops)
                     .path()
@@ -88,9 +90,14 @@ public class PathProcedures implements DomynProcedure {
         }
     }
 
+    public static List<Path> kHop(GraphTraversalSource g, String name, int hops,
+                                   String edgeLabel, int maxPaths) {
+        return kHop(g, name, hops, edgeLabel, maxPaths, null);
+    }
+
     public static List<Path> shortestPath(GraphTraversalSource g, String fromName,
-                                           String toName, int maxDepth) {
-        return g.V().has("name", fromName)
+                                           String toName, int maxDepth, String tenantId) {
+        return tenantFilteredV(g, tenantId).has("name", fromName)
                 .repeat(__.both().simplePath())
                 .until(__.has("name", toName).or().loops().is(maxDepth))
                 .has("name", toName)
@@ -99,9 +106,14 @@ public class PathProcedures implements DomynProcedure {
                 .toList();
     }
 
+    public static List<Path> shortestPath(GraphTraversalSource g, String fromName,
+                                           String toName, int maxDepth) {
+        return shortestPath(g, fromName, toName, maxDepth, null);
+    }
+
     public static List<Map<String, Object>> neighbors(GraphTraversalSource g, String name,
-                                                        int depth) {
-        return g.V().has("name", name)
+                                                        int depth, String tenantId) {
+        return tenantFilteredV(g, tenantId).has("name", name)
                 .repeat(__.both().simplePath())
                 .times(depth)
                 .dedup()
@@ -110,6 +122,19 @@ public class PathProcedures implements DomynProcedure {
                 .stream()
                 .map(PathProcedures::flattenValueMap)
                 .collect(Collectors.toList());
+    }
+
+    public static List<Map<String, Object>> neighbors(GraphTraversalSource g, String name,
+                                                        int depth) {
+        return neighbors(g, name, depth, null);
+    }
+
+    private static GraphTraversal<Vertex, Vertex> tenantFilteredV(
+            GraphTraversalSource g, String tenantId) {
+        if (tenantId != null && !tenantId.isEmpty()) {
+            return g.V().has("tenant_id", tenantId);
+        }
+        return g.V();
     }
 
     @SuppressWarnings("unchecked")

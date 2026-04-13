@@ -1,4 +1,16 @@
-version: '3.8'
+# Copyright 2024 DomynGraph Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 services:
 
@@ -42,13 +54,18 @@ services:
       - domyn-net
 
   janusgraph:
-    image: janusgraph/janusgraph:1.0.0
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: domyngraph:latest
     container_name: domyn-janusgraph
     ports:
       - "8182:8182"
     volumes:
       - ./config/janusgraph-cql-es.properties:/etc/opt/janusgraph/janusgraph.properties
+      - ./config/janusgraph-configurationgraph.properties:/etc/opt/janusgraph/janusgraph-configurationgraph.properties
       - ./config/gremlin-server-domyngraph.yaml:/etc/opt/janusgraph/gremlin-server.yaml
+      - ./config/gremlin-server-domyngraph.yaml:/opt/janusgraph/conf/janusgraph-server.yaml
       - ./scripts:/opt/janusgraph/scripts
     depends_on:
       cassandra:
@@ -57,6 +74,20 @@ services:
         condition: service_healthy
     environment:
       - JAVA_OPTIONS=-Xms1G -Xmx2G
+      - JANUS_PROPS_TEMPLATE=cql-es
+      - janusgraph.storage.hostname=cassandra
+      - janusgraph.storage.port=9042
+      - janusgraph.storage.cql.keyspace=domyngraph
+      - janusgraph.storage.cql.local-datacenter=datacenter1
+      - janusgraph.index.search.hostname=elasticsearch
+      - janusgraph.index.search.port=9200
+      - janusgraph.index.search.elasticsearch.http.scheme=http
+      - janusgraph.index.search.index-name=domyngraph
+      - janusgraph.cache.db-cache=true
+      - janusgraph.cache.db-cache-time=180000
+      - janusgraph.cache.db-cache-size=0.25
+      - janusgraph.schema.default=none
+      - janusgraph.ids.block-size=100000
     networks:
       - domyn-net
 

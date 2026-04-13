@@ -24,6 +24,13 @@ import org.janusgraph.core.JanusGraph;
  * Wraps a standard GraphTraversalSource to automatically inject tenant_id
  * filtering for SHARED_GRAPH multi-tenancy mode. In KEYSPACE_PER_TENANT mode,
  * this wrapper is not needed since isolation is physical.
+ *
+ * <p>Usage:
+ * <pre>
+ *   TenantAwareTraversalSource tats = TenantAwareTraversalSource.create(graph, "acme");
+ *   List&lt;Vertex&gt; vertices = tats.V().toList();          // auto-filtered
+ *   Vertex v = tats.addVertex("Entity");                   // auto-tagged
+ * </pre>
  */
 public class TenantAwareTraversalSource {
 
@@ -31,12 +38,20 @@ public class TenantAwareTraversalSource {
     private final String tenantId;
 
     private TenantAwareTraversalSource(GraphTraversalSource g, String tenantId) {
+        if (g == null) throw new IllegalArgumentException("GraphTraversalSource must not be null");
+        if (tenantId == null || tenantId.isEmpty()) {
+            throw new IllegalArgumentException("tenantId must not be null or empty");
+        }
         this.g = g;
         this.tenantId = tenantId;
     }
 
-    public static GraphTraversalSource create(JanusGraph graph, String tenantId) {
-        return graph.traversal();
+    public static TenantAwareTraversalSource create(JanusGraph graph, String tenantId) {
+        return new TenantAwareTraversalSource(graph.traversal(), tenantId);
+    }
+
+    public static TenantAwareTraversalSource wrap(GraphTraversalSource g, String tenantId) {
+        return new TenantAwareTraversalSource(g, tenantId);
     }
 
     public GraphTraversal<Vertex, Vertex> V() {
@@ -48,8 +63,7 @@ public class TenantAwareTraversalSource {
     }
 
     public Vertex addVertex(String label) {
-        Vertex v = g.addV(label).property("tenant_id", tenantId).next();
-        return v;
+        return g.addV(label).property("tenant_id", tenantId).next();
     }
 
     public String getTenantId() {

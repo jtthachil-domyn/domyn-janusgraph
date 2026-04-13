@@ -57,10 +57,27 @@ public class ProcedureContext {
         return tenantId;
     }
 
+    public boolean hasTenantId() {
+        return tenantId != null && !tenantId.isEmpty();
+    }
+
     public JanusGraph getGraph() {
         return graph;
     }
 
+    /**
+     * Returns the raw traversal source without tenant filtering.
+     * Use {@link #traversal()} for tenant-safe access.
+     */
+    public GraphTraversalSource rawTraversal() {
+        return g;
+    }
+
+    /**
+     * Returns the traversal source. When a tenantId is set, vertex and edge
+     * queries should be additionally filtered by callers or via the
+     * tenant-aware helper methods below.
+     */
     public GraphTraversalSource traversal() {
         return g;
     }

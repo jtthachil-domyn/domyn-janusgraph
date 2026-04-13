@@ -30,7 +30,20 @@ DomynGraph = JanusGraph + three engine modules:
 
 ---
 
-## 2. System Architecture
+## 2. Design Principles
+
+1. **Never expose raw Gremlin externally** — all access goes through procedures with `ProcedureContext`
+2. **Always use `external_id`** — JanusGraph internal IDs are non-portable; external_id is the integration key
+3. **Enforce tenant isolation** — every query in shared mode must filter by `tenant_id`
+4. **OLTP is not OLAP** — traversals and algorithms run on separate execution paths with separate resource limits
+5. **Schema is versioned** — every graph tracks its schema version; migrations are applied on open
+6. **Indexes have lifecycles** — never query an index that isn't ENABLED; use `awaitIndex()` after creation
+7. **Use `graph.traversal()` internally** — traversal sources are an internal detail, not an API contract; expose procedures and APIs externally
+8. **Procedures are the API surface** — external consumers call registered procedures, never raw traversals
+
+---
+
+## 3. System Architecture
 
 
 ```mermaid
@@ -82,7 +95,7 @@ graph TB
 
 ---
 
-## 3. Execution Model
+## 4. Execution Model
 
 ### OLTP vs OLAP Separation
 
@@ -140,7 +153,7 @@ graph LR
 
 ---
 
-## 4. Module Breakdown
+## 5. Module Breakdown
 
 ### Module Dependency Graph
 
@@ -396,7 +409,7 @@ classDiagram
 
 ---
 
-## 5. Data Model
+## 6. Data Model
 
 ### Graph Schema Overview
 
@@ -452,7 +465,7 @@ graph LR
 
 ---
 
-## 6. Indexing Strategy
+## 7. Indexing Strategy
 
 ### Dual Index Architecture
 
@@ -512,7 +525,7 @@ JanusGraph indexes transition through states: `INSTALLED` -> `REGISTERED` -> `EN
 
 ---
 
-## 7. Multi-Tenancy Model
+## 8. Multi-Tenancy Model
 
 ### Isolation Strategy Comparison
 
@@ -602,7 +615,7 @@ sequenceDiagram
 
 ---
 
-## 8. Procedure Execution Flow
+## 9. Procedure Execution Flow
 
 ```mermaid
 sequenceDiagram
@@ -627,7 +640,7 @@ sequenceDiagram
 
 ---
 
-## 9. Docker Deployment Architecture
+## 10. Docker Deployment Architecture
 
 ```mermaid
 graph TB
@@ -659,7 +672,7 @@ graph TB
 
 ---
 
-## 10. Build & Run
+## 11. Build & Run
 
 ### Prerequisites
 
@@ -694,6 +707,23 @@ docker exec domyn-cassandra cqlsh -e "describe cluster"  # Cassandra
 curl http://localhost:8182                   # JanusGraph / Gremlin Server
 ```
 
+### Connect (Python Client)
+
+```python
+from gremlin_python.driver.client import Client
+
+# 'graph' is the only guaranteed binding in JanusGraph
+c = Client('ws://localhost:8182/gremlin', 'graph')
+
+# All queries use graph.traversal() — NOT g
+result = c.submit('graph.traversal().V().count()').all().result()
+print(result)
+
+c.close()
+```
+
+> **Important:** JanusGraph does not support global `g` traversal bindings. The `graph` binding is the only reliable, production-safe binding. Always use `graph.traversal()` in your queries. See [Section 16: Operational Notes](#16-operational-notes) for details.
+
 ### Connect (Gremlin Console)
 
 ```bash
@@ -704,7 +734,9 @@ bin/gremlin.sh
 
 ---
 
-## 11. Example Usage
+## 12. Example Usage
+
+### Groovy (Gremlin Server scripts)
 
 ```groovy
 // List all registered procedures
@@ -717,39 +749,70 @@ DomynProcedures.describe("kHop")
 
 // Create a tenant
 mgr = new TenantManager(TenantIsolationStrategy.KEYSPACE_PER_TENANT)
-graph = mgr.createTenant("acme_corp")
-g = graph.traversal()
+tenantGraph = mgr.createTenant("acme_corp")
+t = tenantGraph.traversal()
 
 // Add data with external IDs
-v1 = g.addV("Entity").property("name", "Tesla").property("type", "Company").next()
+v1 = t.addV("Entity").property("name", "Tesla").property("type", "Company").next()
 ExternalIdProcedures.assignExternalId(v1)
 
-v2 = g.addV("Entity").property("name", "Elon Musk").property("type", "Person").next()
+v2 = t.addV("Entity").property("name", "Elon Musk").property("type", "Person").next()
 ExternalIdProcedures.assignExternalId(v2)
 
-g.V(v1).addE("RELATION").to(v2).property("weight", 0.95).iterate()
-graph.tx().commit()
+t.V(v1).addE("RELATION").to(v2).property("weight", 0.95).iterate()
+tenantGraph.tx().commit()
 
 // k-Hop traversal
-PathProcedures.kHop(g, "Tesla", 2, null, 100)
+PathProcedures.kHop(t, "Tesla", 2, null, 100)
 
 // Lookup by external ID
-ExternalIdProcedures.getByExternalId(g, "some-uuid-here")
+ExternalIdProcedures.getByExternalId(t, "some-uuid-here")
 
 // Check index status
-SchemaProcedures.indexStatus(graph)
+SchemaProcedures.indexStatus(tenantGraph)
 
 // Run PageRank (OLAP — separate execution path)
 config = AlgorithmConfig.builder().maxIterations(30).timeoutMs(60000).build()
 program = DomynPageRankVertexProgram.build().vertexCount(10000).dampingFactor(0.85).create()
-result = AlgorithmResourceManager.getInstance().execute(graph, program, config)
+result = AlgorithmResourceManager.getInstance().execute(tenantGraph, program, config)
 result.isSuccess()     // true
 result.getElapsedMs()  // timing in ms
 ```
 
+### Python (Remote Client)
+
+```python
+from gremlin_python.driver.client import Client
+
+c = Client('ws://localhost:8182/gremlin', 'graph')
+
+# Procedure registry
+c.submit('org.janusgraph.domyn.procedures.ProcedureRegistry.getInstance().listNames()').all().result()
+# => ['getByExternalId', 'indexStatus', 'kHop']
+
+# kHop traversal
+c.submit('org.janusgraph.domyn.procedures.PathProcedures.kHop(graph.traversal(), "Alice", 2, null, 10)').all().result()
+
+# ExternalId lookup
+c.submit('org.janusgraph.domyn.procedures.ExternalIdProcedures.getByExternalId(graph.traversal(), "ext-001")').all().result()
+
+# Index status
+c.submit('org.janusgraph.domyn.procedures.SchemaProcedures.indexStatus(graph)').all().result()
+
+# PageRank (OLAP)
+c.submit('''
+import org.janusgraph.domyn.algorithms.*
+program = DomynPageRankVertexProgram.build().vertexCount(graph.traversal().V().count().next()).dampingFactor(0.85).iterations(20).create(graph)
+config = AlgorithmConfig.builder().timeoutMs(60000).workerThreads(2).build()
+AlgorithmResourceManager.getInstance().execute(graph, program, config).toMap()
+''').all().result()
+
+c.close()
+```
+
 ---
 
-## 12. Extending DomynGraph
+## 13. Extending DomynGraph
 
 ### Adding a Procedure
 
@@ -820,17 +883,6 @@ migrationManager.addMigration(new V2AddTagProperty());
 
 ---
 
-## 13. Design Principles
-
-1. **Never expose raw Gremlin externally** — all access goes through procedures with `ProcedureContext`
-2. **Always use `external_id`** — JanusGraph internal IDs are non-portable; external_id is the integration key
-3. **Enforce tenant isolation** — every query in shared mode must filter by `tenant_id`
-4. **OLTP is not OLAP** — traversals and algorithms run on separate execution paths with separate resource limits
-5. **Schema is versioned** — every graph tracks its schema version; migrations are applied on open
-6. **Indexes have lifecycles** — never query an index that isn't ENABLED; use `awaitIndex()` after creation
-
----
-
 ## 14. Project Structure
 
 ```mermaid
@@ -865,6 +917,220 @@ git merge upstream/master
 ```
 
 DomynGraph modules are additive — they do not modify existing JanusGraph source files (only `pom.xml` and `janusgraph-all/pom.xml` have additions). Merge conflicts should be minimal.
+
+---
+
+## 16. Operational Notes
+
+### Client Connectivity — The `graph` Binding
+
+JanusGraph's `JanusGraphServer` uses a custom settings class (`JanusGraphSettings`) that does **not** support `traversalSources` or `globals` in its YAML configuration. This means:
+
+- There is no reliable way to bind `g` as a global traversal source
+- `traversalSources: { g: graph.traversal() }` will fail with a YAML parse error
+- `globals` sections will fail with the same error
+- Script-based bindings (`g = graph.traversal()` in init scripts) do not persist as global bindings for the traversal op processor
+
+**The only guaranteed binding is `graph`** — the graph instance declared in the `graphs:` section of the YAML.
+
+**Correct client usage:**
+
+```python
+# Python
+c = Client('ws://localhost:8182/gremlin', 'graph')
+c.submit('graph.traversal().V().count()').all().result()
+```
+
+```groovy
+// Groovy (server-side scripts)
+graph.traversal().V().has("name", "Alice").toList()
+```
+
+**For multi-tenant deployments**, each graph gets its own binding:
+
+```yaml
+graphs:
+  graph: conf/janusgraph-cql-es.properties
+  tenant1: conf/tenant1.properties
+  tenant2: conf/tenant2.properties
+```
+
+Then from the client: `Client('ws://localhost:8182/gremlin', 'tenant1')`.
+
+### What NOT to Do with Bindings
+
+- Do NOT try to globally bind `g` via YAML, init scripts, or `JanusGraphManager.putTraversalSource()`
+- Do NOT change the channelizer to non-standard classes
+- Do NOT use `JanusGraphWebSocketChannelizer` (does not exist in current versions)
+- Do NOT experiment with `graphManager` to force traversal source auto-creation
+
+These are dead ends that waste time and break under restarts, multi-tenant graphs, and sessionless requests.
+
+---
+
+## 17. Failure Modes & Operational Risks
+
+### Cassandra Overload
+
+- **Symptoms:** Write timeouts, `NoHostAvailableException`, coordinator timeouts
+- **Cause:** Batch ingestion without rate limiting; too many concurrent writes
+- **Mitigation:** Use `BatchProcedures` with Guava `RateLimiter`; tune `storage.batch-loading=true` and `ids.block-size=1000000` for bulk loads
+- **Recovery:** Reduce write concurrency; wait for Cassandra to stabilize; check `nodetool tpstats` for pending tasks
+
+### Index Not Enabled
+
+- **Symptoms:** Slow queries (full table scan instead of index lookup), missing results from mixed index queries
+- **Cause:** Querying before the index reaches ENABLED state
+- **Mitigation:** Always use `SchemaProcedures.awaitIndex()` after creating any index; check `SchemaProcedures.indexStatus(graph)` before running queries
+- **Recovery:** Run `awaitIndex()` on the stuck index; if stuck in REGISTERED, trigger manual REINDEX via `ManagementSystem`
+
+### Gremlin Server Thread Saturation
+
+- **Symptoms:** Requests hanging for 30+ seconds; `evaluationTimeout` errors
+- **Cause:** Long-running traversals consuming all threads in the pool; unbounded traversals
+- **Mitigation:** `evaluationTimeout: 30000` enforces a hard cutoff; fixed `threadPoolWorker: 8` and `gremlinPool: 16` prevent unbounded growth
+- **Recovery:** Identify and kill long-running queries; add `.limit()` to all traversals; ensure all procedures have bounded execution
+
+### Cross-Tenant Data Leakage (SHARED_GRAPH mode)
+
+- **Symptoms:** Data from another tenant visible in query results
+- **Cause:** Missing `tenant_id` filter in a shared graph query
+- **Mitigation:** Always use `TenantAwareTraversalSource` in SHARED_GRAPH mode; never construct raw `graph.traversal()` without filtering
+- **Recovery:** Audit all query paths for missing `has('tenant_id', tenantId)` filters
+
+### Algorithm Timeout / Incomplete Results
+
+- **Symptoms:** `AlgorithmResult.status = TIMEOUT`; partial vertex property writes
+- **Cause:** Large graph with insufficient `timeoutMs` or `maxIterations`
+- **Mitigation:** Tune `AlgorithmConfig` per workload; start with small graphs and scale; monitor convergence via logs
+- **Recovery:** Increase timeout; reduce graph scope (filter vertices before algorithm); adjust convergence threshold
+
+### Elasticsearch Index Drift
+
+- **Symptoms:** Full-text search returns stale or missing results
+- **Cause:** ES index mappings not matching JanusGraph schema; index not reindexed after schema change
+- **Mitigation:** Use explicit ES mappings (TEXT, STRING, DEFAULT) in `TenantSchemaInitializer`; reindex after schema migrations
+- **Recovery:** Force reindex via `ManagementSystem.updateIndex(index, SchemaAction.REINDEX)`
+
+---
+
+## 18. Performance Characteristics
+
+These are baseline expectations for a single-node Docker Compose deployment (Cassandra 4.1, Elasticsearch 8.12, JanusGraph 1.1.0). Production clusters will scale differently.
+
+### Write Throughput
+
+| Operation | Expected | Notes |
+|---|---|---|
+| Single vertex insert | ~1,000–3,000/sec | With `graph.tx().commit()` per batch |
+| Batch insert (batch-loading=true) | ~5,000–20,000/sec | With `ids.block-size=1000000` and `RateLimiter` |
+| Edge creation | ~500–2,000/sec | Depends on vertex lookup cost |
+
+### Read Latency
+
+| Operation | Expected | Notes |
+|---|---|---|
+| Vertex by composite index | <5ms | `byExternalId`, `byTenantId`, etc. |
+| 1-hop traversal | <50ms | Bounded fan-out |
+| 2-hop traversal | 50–200ms | Depends on graph density |
+| Full-text search (ES) | 10–100ms | Mixed index queries |
+| ValueMap projection | 10–50ms | Per vertex |
+
+### Algorithm Runtime
+
+| Algorithm | 1K vertices | 10K vertices | 100K+ vertices |
+|---|---|---|---|
+| PageRank (20 iter) | <2s | 5–30s | 1–5min |
+| ConnectedComponents | <1s | 2–10s | 30s–3min |
+| BFS (depth 5) | <1s | 1–5s | 10–60s |
+| ShortestDistance | <1s | 2–10s | Depends on graph diameter |
+
+These numbers are approximate and depend on cluster size, graph density, JVM heap, and Cassandra/ES tuning.
+
+---
+
+## 19. Anti-Patterns
+
+Things you must **never** do in a DomynGraph deployment:
+
+1. **Do NOT expose raw Gremlin queries to external clients** — all access must go through `ProcedureRegistry`. Raw Gremlin allows unbounded traversals, data leakage, and injection.
+
+2. **Do NOT bypass `ProcedureRegistry` for new functionality** — every callable operation must be a registered `DomynProcedure` with a `ProcedureDefinition`. This ensures discoverability, introspection, and audit.
+
+3. **Do NOT write per-vertex transactions** — `graph.tx().commit()` after every single vertex is catastrophically slow. Batch writes and commit once per batch.
+
+4. **Do NOT run OLAP algorithms inside Gremlin Server threads** — always use `AlgorithmResourceManager.execute()` which runs on `FulgoraGraphComputer` with its own thread pool and timeout. Running algorithms in the Gremlin thread pool will starve OLTP queries.
+
+5. **Do NOT skip `awaitIndex()` after creating indexes** — indexes transition through INSTALLED -> REGISTERED -> ENABLED. Querying before ENABLED will result in full scans or missing results.
+
+6. **Do NOT create traversal sources without tenant filtering (SHARED_GRAPH mode)** — every `graph.traversal()` in shared mode must be wrapped with `TenantAwareTraversalSource` or manually filtered by `tenant_id`.
+
+7. **Do NOT use unbounded traversals** — every traversal must have `.limit()`, `.times()`, or equivalent bounds. An unbounded `g.V().out().out().out()` on a large graph will timeout or OOM.
+
+8. **Do NOT hardcode JanusGraph internal vertex IDs** — internal IDs are non-portable across graph instances and Cassandra compactions. Always use `external_id` for external references.
+
+---
+
+## 20. Observability
+
+### Procedure-Level Logging
+
+Every procedure execution is logged via `ProcedureContext`:
+
+```
+INFO  [req=abc123] [tenant=acme] PROC_START procedure=kHop
+INFO  [req=abc123] [tenant=acme] PROC_END procedure=kHop success=true elapsed=45ms
+```
+
+Fields injected into MDC (Mapped Diagnostic Context):
+- `requestId` — unique per invocation (UUID)
+- `tenantId` — tenant executing the procedure
+- `procedureName` — name of the called procedure
+
+### Algorithm-Level Logging
+
+Every algorithm execution is logged via `AlgorithmResourceManager`:
+
+```
+INFO  ALGO_START algorithm=DomynPageRankVertexProgram config=AlgorithmConfig{maxIter=20, timeout=60000ms, memLimit=2048MB, threads=2}
+INFO  ALGO_END algorithm=DomynPageRankVertexProgram status=SUCCESS elapsed=1147ms
+```
+
+On timeout:
+```
+WARN  ALGO_END algorithm=DomynPageRankVertexProgram status=TIMEOUT elapsed=60000ms limit=60000ms
+INFO  Cancelled timed-out algorithm: DomynPageRankVertexProgram
+```
+
+### Metrics (Built-in)
+
+Gremlin Server exposes metrics via JMX and SLF4J (configured in `gremlin-server-domyngraph.yaml`):
+
+- `consoleReporter` — every 3 minutes
+- `jmxReporter` — JMX beans for monitoring tools
+- `slf4jReporter` — structured log output every 3 minutes
+
+### Recommended Production Stack
+
+- **Log aggregation:** ELK (Elasticsearch + Logstash + Kibana) or equivalent
+- **Metrics:** Prometheus + Grafana (via JMX exporter)
+- **Alerting:** Alert on `ALGO_END status=TIMEOUT`, `evaluationTimeout` errors, Cassandra `WriteTimeoutException`
+
+---
+
+## 21. Roadmap
+
+Planned enhancements (not yet implemented):
+
+| Priority | Enhancement | Description |
+|---|---|---|
+| High | GraphQL interface | Type-safe query API over registered procedures |
+| High | Native vector index integration | Leverage Elasticsearch/Cassandra vector search for embedding similarity |
+| Medium | Cypher compatibility layer | Translate Cypher queries to Gremlin for Neo4j migration |
+| Medium | Query planner / optimizer | Automatic index selection, traversal rewriting |
+| Medium | REST API layer | HTTP endpoints wrapping `ProcedureRegistry.call()` |
+| Low | Graph exploration UI | Web-based visualization for graph navigation |
+| Low | Streaming ingestion | Kafka connector for real-time graph updates |
 
 ---
 

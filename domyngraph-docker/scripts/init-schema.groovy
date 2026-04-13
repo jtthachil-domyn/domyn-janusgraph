@@ -1,7 +1,23 @@
+// Copyright 2024 DomynGraph Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // =============================================================================
 // DomynGraph Engine — Schema Bootstrap Script
 // Loaded by Gremlin Server on startup via ScriptFileGremlinPlugin
 // =============================================================================
+
+import org.janusgraph.core.schema.Mapping
 
 def initDomynGraphSchema(graph) {
     mgmt = graph.openManagement()
@@ -31,6 +47,13 @@ def initDomynGraphSchema(graph) {
     if (!mgmt.containsPropertyKey('embedding'))      mgmt.makePropertyKey('embedding').dataType(byte[].class).make()
     if (!mgmt.containsPropertyKey('metadata'))        mgmt.makePropertyKey('metadata').dataType(String.class).make()
     if (!mgmt.containsPropertyKey('schema_version'))  mgmt.makePropertyKey('schema_version').dataType(Integer.class).make()
+
+    // -- Algorithm Output Properties (pre-registered for GraphComputer persistence) --
+    if (!mgmt.containsPropertyKey('domyn.pageRank.rank'))                  mgmt.makePropertyKey('domyn.pageRank.rank').dataType(Double.class).make()
+    if (!mgmt.containsPropertyKey('domyn.pageRank.edgeCount'))             mgmt.makePropertyKey('domyn.pageRank.edgeCount').dataType(Double.class).make()
+    if (!mgmt.containsPropertyKey('domyn.connectedComponents.component'))  mgmt.makePropertyKey('domyn.connectedComponents.component').dataType(Long.class).make()
+    if (!mgmt.containsPropertyKey('domyn.bfs.depth'))                      mgmt.makePropertyKey('domyn.bfs.depth').dataType(Integer.class).make()
+    if (!mgmt.containsPropertyKey('domyn.shortestDistance.distance'))       mgmt.makePropertyKey('domyn.shortestDistance.distance').dataType(Long.class).make()
 
     // -- Composite Indexes (Cassandra, exact-match) --
     if (!mgmt.containsGraphIndex('byExternalId'))

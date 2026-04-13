@@ -14,6 +14,7 @@
 
 package org.janusgraph.domyn.procedures;
 
+import org.apache.tinkerpop.gremlin.process.traversal.dsl.graph.GraphTraversal;
 import org.apache.tinkerpop.gremlin.process.traversal.dsl.graph.GraphTraversalSource;
 import org.apache.tinkerpop.gremlin.structure.Vertex;
 
@@ -50,13 +51,22 @@ public class ExternalIdProcedures implements DomynProcedure {
         if (externalId == null || externalId.isEmpty()) {
             throw new IllegalArgumentException("'externalId' parameter is required");
         }
-        return getByExternalId(ctx.traversal(), externalId)
+        return getByExternalId(ctx.traversal(), externalId, ctx.getTenantId())
                 .orElseThrow(() -> new IllegalArgumentException(
                         "No vertex found with external_id: " + externalId));
     }
 
+    public static Optional<Vertex> getByExternalId(GraphTraversalSource g, String externalId,
+                                                     String tenantId) {
+        GraphTraversal<Vertex, Vertex> traversal = g.V().has(EXTERNAL_ID_PROPERTY, externalId);
+        if (tenantId != null && !tenantId.isEmpty()) {
+            traversal = traversal.has("tenant_id", tenantId);
+        }
+        return traversal.tryNext();
+    }
+
     public static Optional<Vertex> getByExternalId(GraphTraversalSource g, String externalId) {
-        return g.V().has(EXTERNAL_ID_PROPERTY, externalId).tryNext();
+        return getByExternalId(g, externalId, null);
     }
 
     public static String assignExternalId(Vertex vertex) {

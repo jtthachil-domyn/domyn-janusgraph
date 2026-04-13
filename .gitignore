@@ -4,6 +4,7 @@ target/
 *.iml
 *.DS_Store
 .vscode/
+domyngraph-docker/lib/
 /_bsp/
 /output/
 # When executing tests in alphabetical order, Maven generates temporary
