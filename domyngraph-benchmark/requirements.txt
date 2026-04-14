@@ -1,0 +1,4 @@
+gremlinpython>=3.7.0
+neo4j>=5.0.0
+matplotlib>=3.8.0
+numpy>=1.26.0

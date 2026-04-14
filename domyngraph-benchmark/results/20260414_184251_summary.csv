@@ -1,0 +1,27 @@
+benchmark,engine,category,iterations,p50_ms,p95_ms,p99_ms,mean_ms,std_ms,ops_per_sec,notes
+B1: Single Load,janusgraph,write,1,8923.84,8923.84,8923.84,8923.84,0.00,431.7,"ticker=AAPL, V=1644, E=2208"
+B1: Single Load,neo4j,write,1,1455.53,1455.53,1455.53,1455.53,0.00,2646.5,"ticker=AAPL, V=1644, E=2208"
+B2: Bulk Load,janusgraph,write,1,60189.23,60189.23,60189.23,60189.23,0.00,1868.0,"V=47542, E=64891"
+B2: Bulk Load,neo4j,write,1,8974.21,8974.21,8974.21,8974.21,0.00,12528.5,"V=47542, E=64891"
+B3: Point Lookup,janusgraph,read,5,2.43,11.70,13.40,4.72,4.57,10584.7,50 lookups per iteration
+B3: Point Lookup,neo4j,read,5,0.57,0.88,0.94,0.59,0.20,84281.3,50 lookups per iteration
+B4: Fulltext Search,janusgraph,read,5,154.83,160.36,161.21,149.37,13.07,133.9,20 searches per iteration
+B4: Fulltext Search,neo4j,read,5,37.41,86.38,94.05,48.37,24.70,413.5,20 searches per iteration
+B5: 1-Hop Traversal,janusgraph,traversal,5,47.94,59.10,60.98,49.85,6.16,0.0,30 seeds
+B5: 1-Hop Traversal,neo4j,traversal,5,13.59,21.38,22.22,15.50,3.94,0.0,30 seeds
+B6: 2-Hop Traversal,janusgraph,traversal,5,17.22,19.62,19.81,16.34,2.87,0.0,15 seeds
+B6: 2-Hop Traversal,neo4j,traversal,5,4.52,5.16,5.18,4.60,0.46,0.0,15 seeds
+B7: Filtered Traversal,janusgraph,traversal,5,31.52,36.44,36.58,31.02,4.95,0.0,"30 seeds, predicate=Discloses"
+B7: Filtered Traversal,neo4j,traversal,5,10.45,12.25,12.38,10.84,1.01,0.0,"30 seeds, predicate=Discloses"
+B8: Count By Type,janusgraph,aggregation,5,23.69,31.20,31.38,25.20,4.84,0.0,tenant=AAPL
+B8: Count By Type,neo4j,aggregation,5,3.38,4.20,4.29,3.53,0.47,0.0,tenant=AAPL
+B9: Top Connected,janusgraph,aggregation,5,32.02,73.38,80.86,40.67,21.35,0.0,tenant=AAPL
+B9: Top Connected,neo4j,aggregation,5,6.69,9.77,9.99,7.09,2.09,0.0,tenant=AAPL
+B10: Tenant Isolation,janusgraph,correctness,5,7.27,9.81,10.20,7.51,1.61,0.0,"tenants=AAPL,ACN"
+B10: Tenant Isolation,neo4j,correctness,5,0.99,1.15,1.16,1.01,0.11,0.0,"tenants=AAPL,ACN"
+B11: Memory Footprint,janusgraph,meta,1,0.00,0.00,0.00,0.00,0.00,0.0,"heapMax=2048MB, heapUsed=0MB, heapFree=0MB"
+B11: Memory Footprint,neo4j,meta,1,0.00,0.00,0.00,0.00,0.00,0.0,"HeapMemoryUsage: used=0MB, max=0MB; NonHeapMemoryUsage: used=0MB, max=0MB"
+B12: Index Verification,janusgraph,meta,1,0.00,0.00,0.00,0.00,0.00,0.0,"external_id lookup profile: [{'dur': 1.072916, 'metrics': [{'dur': 1.072916, 'counts': {'traverserCount': 1, 'elementCount': 1}, 'name': 'JanusGraphStep([],[external_id.eq(ORCL:2024:YEAR)])', 'annotations': {'percentDur': 100.0}, 'id': '0.0.0()', 'metrics': [{'dur': 0.152416, 'counts': {}, 'name': 'constructGraphCentricQuery', 'id': '0.0.0().constructGraphCentricQuery_0'}, {'dur': 0.229834, 'counts': {}, 'name': 'GraphCentricQuery', 'annotations': {'condition': '(external_id = ORCL:2024:YEAR)', 'orders': '[]', 'isFitted':  | tenant scan profile: [{'dur': 1.767792, 'metrics': [{'dur': 1.767792, 'counts': {'traverserCount': 1, 'elementCount': 1}, 'name': 'JanusGraphStep([],[tenant_id.eq(AAPL)])', 'annotations': {'percentDur': 100.0}, 'id': '0.0.0()', 'metrics': [{'dur': 0.120875, 'counts': {}, 'name': 'constructGraphCentricQuery', 'id': '0.0.0().constructGraphCentricQuery_0'}, {'dur': 1.249792, 'counts': {}, 'name': 'GraphCentricQuery', 'annotations': {'condition': '(tenant_id = AAPL)', 'orders': '[]', 'limit': 1, 'isFitted': 'true', 'isO"
+B12: Index Verification,neo4j,meta,1,0.00,0.00,0.00,0.00,0.00,0.0,"point_lookup plan: ? (dbHits=?, rows=?)  | tenant_scan plan: ? (dbHits=?, rows=?) "
+B13: Graph Stats,janusgraph,meta,1,0.00,0.00,0.00,0.00,0.00,0.0,"V=47543, E=58187, avg_deg=2.45"
+B13: Graph Stats,neo4j,meta,1,0.00,0.00,0.00,0.00,0.00,0.0,"V=47542, E=55031, avg_deg=2.32"

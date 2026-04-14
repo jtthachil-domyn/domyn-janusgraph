@@ -1,0 +1,29 @@
+benchmark,engine,category,iterations,p50_ms,p95_ms,p99_ms,mean_ms,std_ms,ops_per_sec,notes
+B1: Single Load,neo4j,write,1,1089.64,1089.64,1089.64,1089.64,0.00,3535.1,"ticker=AAPL, V=1644, E=2208, V_time=0.25s, E_time=0.84s"
+B1: Single Load (jg-fair),janusgraph,write,1,8040.91,8040.91,8040.91,8040.91,0.00,479.1,"ticker=AAPL, V=1644, E=2208, V_time=6.62s, E_time=1.42s, id_cache_time=0.00s, edge_lookup=external_id, lookups_per_edge=2, time_per_edge_ms=0.64, batch_loading=OFF"
+B1: Single Load (jg-optimized),janusgraph,write,1,3808.41,3808.41,3808.41,3808.41,0.00,1011.4,"ticker=AAPL, V=1644, E=2208, V_time=0.79s, E_time=0.91s, id_cache_time=2.10s, edge_lookup=internal_id, lookups_per_edge=0, time_per_edge_ms=0.41, batch_loading=ON"
+B2: Bulk Load,neo4j,write,1,8116.03,8116.03,8116.03,8116.03,0.00,13853.2,"V=47542, E=64891"
+B2: Bulk Load (jg-fair),janusgraph,write,1,45269.63,45269.63,45269.63,45269.63,0.00,2483.6,"V=47542, E=64891, V_time=19.52s, E_time=25.66s, id_cache_time=0.00s, edge_lookup=external_id, lookups_per_edge=2, time_per_edge_ms=0.40, batch_loading=OFF"
+B2: Bulk Load (jg-optimized),janusgraph,write,1,106633.88,106633.88,106633.88,106633.88,0.00,1054.4,"V=47542, E=64891, V_time=20.49s, E_time=25.35s, id_cache_time=60.46s, edge_lookup=internal_id, lookups_per_edge=0, time_per_edge_ms=0.39, batch_loading=OFF"
+B3: Point Lookup,janusgraph,read,10,1.66,7.57,10.86,2.60,3.07,19262.1,50 lookups per iteration
+B3: Point Lookup,neo4j,read,10,0.39,1.26,1.50,0.56,0.37,89807.4,50 lookups per iteration
+B4: Fulltext Search,janusgraph,read,10,133.88,157.62,164.33,136.86,13.05,146.1,20 searches per iteration
+B4: Fulltext Search,neo4j,read,10,54.00,68.47,72.61,51.11,12.97,391.3,20 searches per iteration
+B5: 1-Hop Traversal,janusgraph,traversal,10,64.77,99.74,114.19,63.06,24.87,0.0,30 seeds
+B5: 1-Hop Traversal,neo4j,traversal,10,24.32,37.00,37.94,27.05,7.60,0.0,30 seeds
+B6: 2-Hop Traversal,janusgraph,traversal,10,17.62,43.45,55.31,21.67,12.62,0.0,15 seeds
+B6: 2-Hop Traversal,neo4j,traversal,10,9.68,11.72,11.77,9.91,1.28,0.0,15 seeds
+B7: Filtered Traversal,janusgraph,traversal,10,30.92,39.23,39.80,30.52,6.24,0.0,"30 seeds, predicate=Discloses"
+B7: Filtered Traversal,neo4j,traversal,10,9.86,28.21,38.99,13.07,9.60,0.0,"30 seeds, predicate=Discloses"
+B8: Count By Type,janusgraph,aggregation,10,13.19,18.23,19.39,13.54,2.96,0.0,tenant=AAPL
+B8: Count By Type,neo4j,aggregation,10,2.90,5.37,6.75,3.14,1.39,0.0,tenant=AAPL
+B9: Top Connected,janusgraph,aggregation,10,20.75,29.55,31.84,21.53,4.56,0.0,tenant=AAPL
+B9: Top Connected,neo4j,aggregation,10,4.57,10.22,13.61,5.55,2.99,0.0,tenant=AAPL
+B10: Tenant Isolation,janusgraph,correctness,10,7.49,11.12,12.11,7.80,2.09,0.0,"tenants=AAPL,ACN"
+B10: Tenant Isolation,neo4j,correctness,10,1.12,4.75,6.42,1.89,1.71,0.0,"tenants=AAPL,ACN"
+B11: Memory Footprint,janusgraph,meta,1,0.00,0.00,0.00,0.00,0.00,0.0,"heapMax=2048MB, heapUsed=0MB, heapFree=0MB"
+B11: Memory Footprint,neo4j,meta,1,0.00,0.00,0.00,0.00,0.00,0.0,"HeapMemoryUsage: used=0MB, max=0MB; NonHeapMemoryUsage: used=0MB, max=0MB"
+B12: Index Verification,janusgraph,meta,1,0.00,0.00,0.00,0.00,0.00,0.0,"external_id lookup profile: [{'dur': 2.120958, 'metrics': [{'dur': 2.120958, 'counts': {'traverserCount': 1, 'elementCount': 1}, 'name': 'JanusGraphStep([],[external_id.eq(MSFT:Managing Cybersecurity Risk:RISK_FACTOR)])', 'annotations': {'percentDur': 100.0}, 'id': '0.0.0()', 'metrics': [{'dur': 0.139667, 'counts': {}, 'name': 'constructGraphCentricQuery', 'id': '0.0.0().constructGraphCentricQuery_0'}, {'dur': 1.060125, 'counts': {}, 'name': 'GraphCentricQuery', 'annotations': {'condition': '(external_id = MSFT:Managing Cy | tenant scan profile: [{'dur': 5.3275, 'metrics': [{'dur': 5.3275, 'counts': {'traverserCount': 1, 'elementCount': 1}, 'name': 'JanusGraphStep([],[tenant_id.eq(AAPL)])', 'annotations': {'percentDur': 100.0}, 'id': '0.0.0()', 'metrics': [{'dur': 0.131375, 'counts': {}, 'name': 'constructGraphCentricQuery', 'id': '0.0.0().constructGraphCentricQuery_0'}, {'dur': 4.832208, 'counts': {}, 'name': 'GraphCentricQuery', 'annotations': {'condition': '(tenant_id = AAPL)', 'orders': '[]', 'limit': 1, 'isFitted': 'true', 'isOrder"
+B12: Index Verification,neo4j,meta,1,0.00,0.00,0.00,0.00,0.00,0.0,"point_lookup plan: ? (dbHits=?, rows=?)  | tenant_scan plan: ? (dbHits=?, rows=?) "
+B13: Graph Stats,janusgraph,meta,1,0.00,0.00,0.00,0.00,0.00,0.0,"V=47542, E=64891, avg_deg=2.73"
+B13: Graph Stats,neo4j,meta,1,0.00,0.00,0.00,0.00,0.00,0.0,"V=47542, E=55031, avg_deg=2.32"

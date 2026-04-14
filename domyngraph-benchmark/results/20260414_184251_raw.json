@@ -1,0 +1,534 @@
+[
+  {
+    "name": "B1: Single Load",
+    "engine": "janusgraph",
+    "category": "write",
+    "iterations": 1,
+    "warm_up_runs": 0,
+    "times_ms": [
+      8923.843000084162
+    ],
+    "p50": 8923.843000084162,
+    "p95": 8923.843000084162,
+    "p99": 8923.843000084162,
+    "mean": 8923.843000084162,
+    "std_dev": 0.0,
+    "ops_per_sec": 431.65259630449253,
+    "records_processed": 3852,
+    "notes": "ticker=AAPL, V=1644, E=2208"
+  },
+  {
+    "name": "B1: Single Load",
+    "engine": "neo4j",
+    "category": "write",
+    "iterations": 1,
+    "warm_up_runs": 0,
+    "times_ms": [
+      1455.5332920281217
+    ],
+    "p50": 1455.5332920281217,
+    "p95": 1455.5332920281217,
+    "p99": 1455.5332920281217,
+    "mean": 1455.5332920281217,
+    "std_dev": 0.0,
+    "ops_per_sec": 2646.4526926984076,
+    "records_processed": 3852,
+    "notes": "ticker=AAPL, V=1644, E=2208"
+  },
+  {
+    "name": "B2: Bulk Load",
+    "engine": "janusgraph",
+    "category": "write",
+    "iterations": 1,
+    "warm_up_runs": 0,
+    "times_ms": [
+      60189.23425010871
+    ],
+    "p50": 60189.23425010871,
+    "p95": 60189.23425010871,
+    "p99": 60189.23425010871,
+    "mean": 60189.23425010871,
+    "std_dev": 0.0,
+    "ops_per_sec": 1867.9918660004705,
+    "records_processed": 112433,
+    "notes": "V=47542, E=64891"
+  },
+  {
+    "name": "B2: Bulk Load",
+    "engine": "neo4j",
+    "category": "write",
+    "iterations": 1,
+    "warm_up_runs": 0,
+    "times_ms": [
+      8974.205833976157
+    ],
+    "p50": 8974.205833976157,
+    "p95": 8974.205833976157,
+    "p99": 8974.205833976157,
+    "mean": 8974.205833976157,
+    "std_dev": 0.0,
+    "ops_per_sec": 12528.46235979244,
+    "records_processed": 112433,
+    "notes": "V=47542, E=64891"
+  },
+  {
+    "name": "B3: Point Lookup",
+    "engine": "janusgraph",
+    "category": "read",
+    "iterations": 5,
+    "warm_up_runs": 3,
+    "times_ms": [
+      13.824075842276216,
+      2.1775592351332307,
+      3.203242456074804,
+      2.4299624818377197,
+      1.9842042378149927
+    ],
+    "p50": 2.4299624818377197,
+    "p95": 11.699909165035931,
+    "p99": 13.399242506828159,
+    "mean": 4.7238088506273925,
+    "std_dev": 4.5689721641107095,
+    "ops_per_sec": 10584.678927759587,
+    "records_processed": 50,
+    "notes": "50 lookups per iteration"
+  },
+  {
+    "name": "B3: Point Lookup",
+    "engine": "neo4j",
+    "category": "read",
+    "iterations": 5,
+    "warm_up_runs": 3,
+    "times_ms": [
+      0.9493415965698659,
+      0.6274774274788797,
+      0.5701390188187361,
+      0.42847494361922145,
+      0.390825814101845
+    ],
+    "p50": 0.5701390188187361,
+    "p95": 0.8849687627516687,
+    "p99": 0.9364670298062265,
+    "mean": 0.5932517601177096,
+    "std_dev": 0.19830947007996785,
+    "ops_per_sec": 84281.25015605397,
+    "records_processed": 50,
+    "notes": "50 lookups per iteration"
+  },
+  {
+    "name": "B4: Fulltext Search",
+    "engine": "janusgraph",
+    "category": "read",
+    "iterations": 5,
+    "warm_up_runs": 3,
+    "times_ms": [
+      124.22158406116068,
+      154.8329999204725,
+      156.09379101078957,
+      150.2918329788372,
+      161.42654209397733
+    ],
+    "p50": 154.8329999204725,
+    "p95": 160.35999187733978,
+    "p99": 161.21323205064982,
+    "mean": 149.37335001304746,
+    "std_dev": 13.066801330949412,
+    "ops_per_sec": 133.89269235946733,
+    "records_processed": 20,
+    "notes": "20 searches per iteration"
+  },
+  {
+    "name": "B4: Fulltext Search",
+    "engine": "neo4j",
+    "category": "read",
+    "iterations": 5,
+    "warm_up_runs": 3,
+    "times_ms": [
+      95.97016591578722,
+      48.027959070168436,
+      37.40904096048325,
+      31.67804202530533,
+      28.75316608697176
+    ],
+    "p50": 37.40904096048325,
+    "p95": 86.38172454666345,
+    "p99": 94.05247764196247,
+    "mean": 48.3676748117432,
+    "std_dev": 24.69606048357479,
+    "ops_per_sec": 413.4993066721536,
+    "records_processed": 20,
+    "notes": "20 searches per iteration"
+  },
+  {
+    "name": "B5: 1-Hop Traversal",
+    "engine": "janusgraph",
+    "category": "traversal",
+    "iterations": 5,
+    "warm_up_runs": 3,
+    "times_ms": [
+      46.781333978287876,
+      47.944333986379206,
+      61.444791965186596,
+      43.34695904981345,
+      49.709041020832956
+    ],
+    "p50": 47.944333986379206,
+    "p95": 59.09764177631587,
+    "p99": 60.97536192741245,
+    "mean": 49.84529200010002,
+    "std_dev": 6.161116376624146,
+    "ops_per_sec": 0.0,
+    "records_processed": 0,
+    "notes": "30 seeds"
+  },
+  {
+    "name": "B5: 1-Hop Traversal",
+    "engine": "neo4j",
+    "category": "traversal",
+    "iterations": 5,
+    "warm_up_runs": 3,
+    "times_ms": [
+      17.17495801858604,
+      12.774833012372255,
+      13.592083938419819,
+      11.537541984580457,
+      22.43220806121826
+    ],
+    "p50": 13.592083938419819,
+    "p95": 21.380758052691817,
+    "p99": 22.221918059512973,
+    "mean": 15.502325003035367,
+    "std_dev": 3.940272027977354,
+    "ops_per_sec": 0.0,
+    "records_processed": 0,
+    "notes": "30 seeds"
+  },
+  {
+    "name": "B6: 2-Hop Traversal",
+    "engine": "janusgraph",
+    "category": "traversal",
+    "iterations": 5,
+    "warm_up_runs": 3,
+    "times_ms": [
+      12.8251250134781,
+      18.650042009539902,
+      19.86250001937151,
+      17.224667011760175,
+      13.125875033438206
+    ],
+    "p50": 17.224667011760175,
+    "p95": 19.620008417405188,
+    "p99": 19.814001698978245,
+    "mean": 16.33764181751758,
+    "std_dev": 2.870952937978545,
+    "ops_per_sec": 0.0,
+    "records_processed": 0,
+    "notes": "15 seeds"
+  },
+  {
+    "name": "B6: 2-Hop Traversal",
+    "engine": "neo4j",
+    "category": "traversal",
+    "iterations": 5,
+    "warm_up_runs": 3,
+    "times_ms": [
+      3.911999985575676,
+      4.335625097155571,
+      5.024541052989662,
+      4.519416950643063,
+      5.1914999494329095
+    ],
+    "p50": 4.519416950643063,
+    "p95": 5.15810817014426,
+    "p99": 5.18482159357518,
+    "mean": 4.596616607159376,
+    "std_dev": 0.4647110491612329,
+    "ops_per_sec": 0.0,
+    "records_processed": 0,
+    "notes": "15 seeds"
+  },
+  {
+    "name": "B7: Filtered Traversal",
+    "engine": "janusgraph",
+    "category": "traversal",
+    "iterations": 5,
+    "warm_up_runs": 3,
+    "times_ms": [
+      36.61912493407726,
+      35.72941699530929,
+      27.92145893909037,
+      23.322916007600725,
+      31.519875046797097
+    ],
+    "p50": 31.519875046797097,
+    "p95": 36.44118334632367,
+    "p99": 36.583536616526544,
+    "mean": 31.02255838457495,
+    "std_dev": 4.952266339587524,
+    "ops_per_sec": 0.0,
+    "records_processed": 0,
+    "notes": "30 seeds, predicate=Discloses"
+  },
+  {
+    "name": "B7: Filtered Traversal",
+    "engine": "neo4j",
+    "category": "traversal",
+    "iterations": 5,
+    "warm_up_runs": 3,
+    "times_ms": [
+      10.454333038069308,
+      12.413166929036379,
+      9.75575007032603,
+      9.973583044484258,
+      11.587624903768301
+    ],
+    "p50": 10.454333038069308,
+    "p95": 12.248058523982763,
+    "p99": 12.380145248025656,
+    "mean": 10.836891597136855,
+    "std_dev": 1.0108178994096355,
+    "ops_per_sec": 0.0,
+    "records_processed": 0,
+    "notes": "30 seeds, predicate=Discloses"
+  },
+  {
+    "name": "B8: Count By Type",
+    "engine": "janusgraph",
+    "category": "aggregation",
+    "iterations": 5,
+    "warm_up_runs": 3,
+    "times_ms": [
+      30.311375041492283,
+      31.421583029441535,
+      21.18108293507248,
+      19.379665958695114,
+      23.68966699577868
+    ],
+    "p50": 23.68966699577868,
+    "p95": 31.199541431851685,
+    "p99": 31.377174709923565,
+    "mean": 25.19667479209602,
+    "std_dev": 4.840315763104003,
+    "ops_per_sec": 0.0,
+    "records_processed": 0,
+    "notes": "tenant=AAPL"
+  },
+  {
+    "name": "B8: Count By Type",
+    "engine": "neo4j",
+    "category": "aggregation",
+    "iterations": 5,
+    "warm_up_runs": 3,
+    "times_ms": [
+      3.757958998903632,
+      4.3137079337611794,
+      3.3762080129235983,
+      2.936749951913953,
+      3.261582925915718
+    ],
+    "p50": 3.3762080129235983,
+    "p95": 4.20255814678967,
+    "p99": 4.2914779763668776,
+    "mean": 3.529241564683616,
+    "std_dev": 0.4719758203560199,
+    "ops_per_sec": 0.0,
+    "records_processed": 0,
+    "notes": "tenant=AAPL"
+  },
+  {
+    "name": "B9: Top Connected",
+    "engine": "janusgraph",
+    "category": "aggregation",
+    "iterations": 5,
+    "warm_up_runs": 3,
+    "times_ms": [
+      35.98499996587634,
+      32.02362498268485,
+      26.949875056743622,
+      25.67883301526308,
+      82.72991701960564
+    ],
+    "p50": 32.02362498268485,
+    "p95": 73.38093360885976,
+    "p99": 80.86012033745646,
+    "mean": 40.673450008034706,
+    "std_dev": 21.34817323550639,
+    "ops_per_sec": 0.0,
+    "records_processed": 0,
+    "notes": "tenant=AAPL"
+  },
+  {
+    "name": "B9: Top Connected",
+    "engine": "neo4j",
+    "category": "aggregation",
+    "iterations": 5,
+    "warm_up_runs": 3,
+    "times_ms": [
+      10.03962499089539,
+      5.925333010964096,
+      8.714249939657748,
+      6.688917055726051,
+      4.079416976310313
+    ],
+    "p50": 6.688917055726051,
+    "p95": 9.774549980647862,
+    "p99": 9.986609988845885,
+    "mean": 7.08950839471072,
+    "std_dev": 2.0937717693712457,
+    "ops_per_sec": 0.0,
+    "records_processed": 0,
+    "notes": "tenant=AAPL"
+  },
+  {
+    "name": "B10: Tenant Isolation",
+    "engine": "janusgraph",
+    "category": "correctness",
+    "iterations": 5,
+    "warm_up_runs": 3,
+    "times_ms": [
+      5.423500086180866,
+      7.855791947804391,
+      10.295500047504902,
+      6.700790952891111,
+      7.272667018696666
+    ],
+    "p50": 7.272667018696666,
+    "p95": 9.8075584275648,
+    "p99": 10.197911723516881,
+    "mean": 7.509650010615587,
+    "std_dev": 1.608925734125586,
+    "ops_per_sec": 0.0,
+    "records_processed": 0,
+    "notes": "tenants=AAPL,ACN"
+  },
+  {
+    "name": "B10: Tenant Isolation",
+    "engine": "neo4j",
+    "category": "correctness",
+    "iterations": 5,
+    "warm_up_runs": 3,
+    "times_ms": [
+      0.990375061519444,
+      0.8887919830158353,
+      0.9011250222101808,
+      1.159332925453782,
+      1.1244579218328
+    ],
+    "p50": 0.990375061519444,
+    "p95": 1.1523579247295856,
+    "p99": 1.1579379253089428,
+    "mean": 1.0128165828064084,
+    "std_dev": 0.11161680445315947,
+    "ops_per_sec": 0.0,
+    "records_processed": 0,
+    "notes": "tenants=AAPL,ACN"
+  },
+  {
+    "name": "B11: Memory Footprint",
+    "engine": "janusgraph",
+    "category": "meta",
+    "iterations": 1,
+    "warm_up_runs": 0,
+    "times_ms": [
+      0
+    ],
+    "p50": 0.0,
+    "p95": 0.0,
+    "p99": 0.0,
+    "mean": 0.0,
+    "std_dev": 0.0,
+    "ops_per_sec": 0.0,
+    "records_processed": 0,
+    "notes": "heapMax=2048MB, heapUsed=0MB, heapFree=0MB"
+  },
+  {
+    "name": "B11: Memory Footprint",
+    "engine": "neo4j",
+    "category": "meta",
+    "iterations": 1,
+    "warm_up_runs": 0,
+    "times_ms": [
+      0
+    ],
+    "p50": 0.0,
+    "p95": 0.0,
+    "p99": 0.0,
+    "mean": 0.0,
+    "std_dev": 0.0,
+    "ops_per_sec": 0.0,
+    "records_processed": 0,
+    "notes": "HeapMemoryUsage: used=0MB, max=0MB; NonHeapMemoryUsage: used=0MB, max=0MB"
+  },
+  {
+    "name": "B12: Index Verification",
+    "engine": "janusgraph",
+    "category": "meta",
+    "iterations": 1,
+    "warm_up_runs": 0,
+    "times_ms": [
+      0
+    ],
+    "p50": 0.0,
+    "p95": 0.0,
+    "p99": 0.0,
+    "mean": 0.0,
+    "std_dev": 0.0,
+    "ops_per_sec": 0.0,
+    "records_processed": 0,
+    "notes": "external_id lookup profile: [{'dur': 1.072916, 'metrics': [{'dur': 1.072916, 'counts': {'traverserCount': 1, 'elementCount': 1}, 'name': 'JanusGraphStep([],[external_id.eq(ORCL:2024:YEAR)])', 'annotations': {'percentDur': 100.0}, 'id': '0.0.0()', 'metrics': [{'dur': 0.152416, 'counts': {}, 'name': 'constructGraphCentricQuery', 'id': '0.0.0().constructGraphCentricQuery_0'}, {'dur': 0.229834, 'counts': {}, 'name': 'GraphCentricQuery', 'annotations': {'condition': '(external_id = ORCL:2024:YEAR)', 'orders': '[]', 'isFitted':  | tenant scan profile: [{'dur': 1.767792, 'metrics': [{'dur': 1.767792, 'counts': {'traverserCount': 1, 'elementCount': 1}, 'name': 'JanusGraphStep([],[tenant_id.eq(AAPL)])', 'annotations': {'percentDur': 100.0}, 'id': '0.0.0()', 'metrics': [{'dur': 0.120875, 'counts': {}, 'name': 'constructGraphCentricQuery', 'id': '0.0.0().constructGraphCentricQuery_0'}, {'dur': 1.249792, 'counts': {}, 'name': 'GraphCentricQuery', 'annotations': {'condition': '(tenant_id = AAPL)', 'orders': '[]', 'limit': 1, 'isFitted': 'true', 'isO"
+  },
+  {
+    "name": "B12: Index Verification",
+    "engine": "neo4j",
+    "category": "meta",
+    "iterations": 1,
+    "warm_up_runs": 0,
+    "times_ms": [
+      0
+    ],
+    "p50": 0.0,
+    "p95": 0.0,
+    "p99": 0.0,
+    "mean": 0.0,
+    "std_dev": 0.0,
+    "ops_per_sec": 0.0,
+    "records_processed": 0,
+    "notes": "point_lookup plan: ? (dbHits=?, rows=?)  | tenant_scan plan: ? (dbHits=?, rows=?) "
+  },
+  {
+    "name": "B13: Graph Stats",
+    "engine": "janusgraph",
+    "category": "meta",
+    "iterations": 1,
+    "warm_up_runs": 0,
+    "times_ms": [
+      0
+    ],
+    "p50": 0.0,
+    "p95": 0.0,
+    "p99": 0.0,
+    "mean": 0.0,
+    "std_dev": 0.0,
+    "ops_per_sec": 0.0,
+    "records_processed": 0,
+    "notes": "V=47543, E=58187, avg_deg=2.45"
+  },
+  {
+    "name": "B13: Graph Stats",
+    "engine": "neo4j",
+    "category": "meta",
+    "iterations": 1,
+    "warm_up_runs": 0,
+    "times_ms": [
+      0
+    ],
+    "p50": 0.0,
+    "p95": 0.0,
+    "p99": 0.0,
+    "mean": 0.0,
+    "std_dev": 0.0,
+    "ops_per_sec": 0.0,
+    "records_processed": 0,
+    "notes": "V=47542, E=55031, avg_deg=2.32"
+  }
+]

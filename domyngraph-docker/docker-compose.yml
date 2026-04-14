@@ -88,6 +88,54 @@ services:
       - janusgraph.cache.db-cache-size=0.25
       - janusgraph.schema.default=none
       - janusgraph.ids.block-size=100000
+    healthcheck:
+      test: ["CMD-SHELL", "bin/gremlin.sh -e /opt/janusgraph/scripts/health-check.groovy || exit 1"]
+      interval: 15s
+      timeout: 15s
+      retries: 15
+      start_period: 90s
+    networks:
+      - domyn-net
+
+  domyngraph-api:
+    build:
+      context: ../domyngraph-api
+      dockerfile: Dockerfile
+    container_name: domyn-api
+    ports:
+      - "8080:8080"
+    depends_on:
+      janusgraph:
+        condition: service_healthy
+    environment:
+      - GREMLIN_HOST=janusgraph
+      - GREMLIN_PORT=8182
+      - GREMLIN_URL=ws://janusgraph:8182/gremlin
+      - CORS_ORIGIN=http://localhost:3000
+      - QUERY_TIMEOUT_S=10
+      - PROCEDURE_TIMEOUT_S=30
+      - MAX_EXPAND_NODES=100
+      - CACHE_TTL_S=30
+      - CACHE_MAX_SIZE=500
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - domyn-net
+
+  domyngraph-ui:
+    build:
+      context: ../domyngraph-ui
+      dockerfile: Dockerfile
+    container_name: domyn-ui
+    ports:
+      - "3000:80"
+    depends_on:
+      domyngraph-api:
+        condition: service_healthy
     networks:
       - domyn-net
 

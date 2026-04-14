@@ -50,3 +50,10 @@ janusgraph-*/pom.xml.versionsBackup
 .factorypath
 
 janusgraph-benchmark/benchmark.json
+
+# DomynGraph
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+UNDERSTANDING_DOMYNGRAPH.md
