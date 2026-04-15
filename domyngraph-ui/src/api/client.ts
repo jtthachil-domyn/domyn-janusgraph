@@ -48,8 +48,9 @@ export async function getVertexDetail(
   return request<GraphNode>(`/api/graph/vertex/${vertexId}?${params}`);
 }
 
-export async function loadInitialGraph(tenant: string): Promise<GraphResponse> {
-  return request<GraphResponse>(`/api/graph/overview?tenant=${tenant}`);
+export async function loadInitialGraph(tenant: string, limit?: number): Promise<GraphResponse> {
+  const effectiveLimit = limit ?? (tenant === "__ALL__" ? 3000 : 5000);
+  return request<GraphResponse>(`/api/graph/overview?tenant=${tenant}&limit=${effectiveLimit}`);
 }
 
 export async function listProcedures(): Promise<{ procedures: string[] }> {
@@ -107,4 +108,20 @@ export async function listTenants(): Promise<{
 
 export async function getHealth(): Promise<Record<string, unknown>> {
   return request("/api/health");
+}
+
+export interface GremlinQueryResult {
+  result: unknown;
+  count: number;
+  elapsed_ms: number;
+}
+
+export async function executeGremlinQuery(
+  query: string,
+  timeoutS = 30
+): Promise<GremlinQueryResult> {
+  return request<GremlinQueryResult>("/api/gremlin/query", {
+    method: "POST",
+    body: JSON.stringify({ query, timeout_s: timeoutS }),
+  });
 }

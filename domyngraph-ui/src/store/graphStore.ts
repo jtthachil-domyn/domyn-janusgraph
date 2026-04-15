@@ -77,7 +77,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   pinnedNodes: new Set(),
   expandedNodes: new Map(),
 
-  activeTenant: "demo",
+  activeTenant: "__ALL__",
   activePerspective: "Full Graph",
   activeLayout: "force",
   showEdgeArrows: false,
@@ -305,7 +305,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       hiddenNodes: new Set(),
       pinnedNodes: new Set(),
       expandedNodes: new Map(),
-      activeTenant: "demo",
+      activeTenant: "__ALL__",
       activePerspective: "Full Graph",
       activeLayout: "force",
     }),

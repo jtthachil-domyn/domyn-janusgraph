@@ -25,12 +25,29 @@ function nodeColor(node: GraphNode): string {
   return TYPE_COLORS[node.type] || "#6b7280";
 }
 
-function layoutConfig(layout: string) {
+function layoutConfig(layout: string, nodeCount = 0) {
   if (layout === "dagre") {
     return { type: "dagre" as const, rankdir: "TB", nodesep: 60, ranksep: 80 };
   }
   if (layout === "radial") {
     return { type: "radial" as const, unitRadius: 120, linkDistance: 150 };
+  }
+  if (nodeCount > 2000) {
+    return {
+      type: "d3-force" as const,
+      link: { distance: 60 },
+      charge: { strength: -30 },
+      collide: { radius: 10 },
+      simulation: { alphaDecay: 0.1 },
+    };
+  }
+  if (nodeCount > 500) {
+    return {
+      type: "d3-force" as const,
+      link: { distance: 100 },
+      charge: { strength: -120 },
+      collide: { radius: 20 },
+    };
   }
   return {
     type: "d3-force" as const,
@@ -156,14 +173,14 @@ export default function GraphCanvas() {
       container: containerRef.current,
       autoFit: "view",
       padding: 40,
-      animation: true,
+      animation: false,
       node: {
         type: "circle",
         style: {
           size: (d: Record<string, unknown>) => {
             const data = d.data as Record<string, unknown>;
             const edgeCount = (data?.edgeCount as number) || 1;
-            return Math.max(20, Math.min(16 + edgeCount * 4, 44));
+            return Math.max(8, Math.min(8 + edgeCount * 2, 32));
           },
           labelText: (d: Record<string, unknown>) =>
             (d.data as Record<string, unknown>)?.label as string || d.id as string,
@@ -200,7 +217,7 @@ export default function GraphCanvas() {
           },
         },
       },
-      layout: layoutConfig(activeLayout),
+      layout: layoutConfig(activeLayout, 0),
       behaviors: ["drag-canvas", "zoom-canvas", "drag-element"],
       plugins: [
         { type: "minimap", key: "minimap", size: [120, 80] },
@@ -219,16 +236,16 @@ export default function GraphCanvas() {
       ],
     });
 
-    graph.on("node:click", (evt: { target: { id: string } }) => {
-      handleNodeClick(evt.target.id);
+    graph.on("node:click", (evt: any) => {
+      handleNodeClick(evt.target?.id ?? evt.itemId);
     });
 
-    graph.on("node:dblclick", (evt: { target: { id: string } }) => {
-      handleToggleExpand(evt.target.id);
+    graph.on("node:dblclick", (evt: any) => {
+      handleToggleExpand(evt.target?.id ?? evt.itemId);
     });
 
-    graph.on("edge:click", (evt: { target: { id: string } }) => {
-      handleEdgeClick(evt.target.id);
+    graph.on("edge:click", (evt: any) => {
+      handleEdgeClick(evt.target?.id ?? evt.itemId);
     });
 
     graphRef.current = graph;
@@ -250,6 +267,21 @@ export default function GraphCanvas() {
     renderedVersionRef.current = graphVersion;
 
     const { nodes, edges } = buildNodeData(viewGraph);
+    const nodeCount = nodes.length;
+
+    if (nodeCount > 1000) {
+      nodes.forEach((n: any) => {
+        if (n.style) {
+          n.style.labelText = "";
+          n.style.iconText = "";
+        }
+        if (n.data) n.data.label = "";
+      });
+    }
+
+    try {
+      graph.setLayout(layoutConfig(activeLayout, nodeCount));
+    } catch { /* fallback */ }
 
     graph.setData({ nodes, edges });
     graph.render().catch(() => {});
@@ -262,7 +294,7 @@ export default function GraphCanvas() {
         } catch { /* node may not be in view */ }
       }, 400);
     }
-  }, [graphVersion, graphReady, viewGraph, focusedNodeId]);
+  }, [graphVersion, graphReady, viewGraph, focusedNodeId, activeLayout]);
 
   // Effect 3: Update visual selection styles without re-rendering data
   useEffect(() => {

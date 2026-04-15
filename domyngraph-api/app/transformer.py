@@ -27,6 +27,25 @@ def _normalize_keys(d: dict) -> dict[str, Any]:
     return result
 
 
+def _safe_value(v: Any) -> Any:
+    """Coerce JanusGraph types (BigDecimal, etc.) to JSON-safe primitives."""
+    if v is None or isinstance(v, (str, int, float, bool)):
+        return v
+    type_name = type(v).__name__
+    if type_name in ("BigDecimal", "Decimal"):
+        return float(str(v))
+    if isinstance(v, bytes):
+        return v.decode("utf-8", errors="replace")
+    if isinstance(v, (list, tuple)):
+        return [_safe_value(item) for item in v]
+    if isinstance(v, dict):
+        return {str(k2): _safe_value(v2) for k2, v2 in v.items()}
+    try:
+        return float(v)
+    except (ValueError, TypeError):
+        return str(v)
+
+
 def _flatten_properties(props: dict[str, Any]) -> dict[str, Any]:
     """Flatten JanusGraph's nested property format.
 
@@ -40,9 +59,9 @@ def _flatten_properties(props: dict[str, Any]) -> dict[str, Any]:
         if k in ("id", "T.id", "T.label", "label", "1", "4"):
             continue
         if isinstance(v, list) and len(v) == 1:
-            flat[k] = v[0]
+            flat[k] = _safe_value(v[0])
         else:
-            flat[k] = v
+            flat[k] = _safe_value(v)
     return flat
 
 

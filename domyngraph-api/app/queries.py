@@ -1,41 +1,23 @@
 """Gremlin query builders for DomynGraph Lens API.
 
-Tenant is ALWAYS enforced inside the Gremlin traversal, not just at the API layer.
+When tenant is "__ALL__", tenant filtering is skipped and the full graph is queried.
 """
 
 from __future__ import annotations
 
+ALL_TENANT = "__ALL__"
 
-def expand_query(
-    vertex_id: str,
-    tenant: str,
-    depth: int = 1,
-    limit: int = 50,
-    edge_types: str | None = None,
-) -> str:
-    """Build a Gremlin query that expands neighbors from a vertex.
 
-    Returns elementMap of center vertex + neighbors + connecting edges.
-    """
-    edge_filter = ""
-    if edge_types:
-        types = ",".join(f"'{t.strip()}'" for t in edge_types.split(","))
-        edge_filter = f".hasLabel({types})"
-
-    return f"""
-t = graph.traversal()
-center = t.V({vertex_id}).has('tenant_id', '{tenant}').next()
-neighbors = t.V(center).bothE(){edge_filter}.otherV().has('tenant_id', '{tenant}').dedup().limit({limit}).toList()
-edges = t.V(center).bothE(){edge_filter}.has('tenant_id', '{tenant}').or().where(__.otherV().has('tenant_id', '{tenant}')).dedup().limit({limit * 2}).elementMap().toList()
-nodes = neighbors.collect {{ it -> t.V(it).elementMap().next() }}
-centerMap = t.V(center).elementMap().next()
-nodes.add(0, centerMap)
-[nodes: nodes, edges: edges]
-"""
+def _tenant_filter(tenant: str) -> str:
+    """Return the .has('tenant_id', ...) clause, or empty string for ALL."""
+    if tenant == ALL_TENANT:
+        return ""
+    return f".has('tenant_id', '{tenant}')"
 
 
 def expand_center_query(vertex_id: str, tenant: str) -> str:
-    return f"graph.traversal().V({vertex_id}).has('tenant_id', '{tenant}').elementMap().toList()"
+    tf = _tenant_filter(tenant)
+    return f"graph.traversal().V({vertex_id}){tf}.elementMap().toList()"
 
 
 def expand_edges_query(
@@ -44,11 +26,12 @@ def expand_edges_query(
     limit: int = 50,
     edge_types: str | None = None,
 ) -> str:
+    tf = _tenant_filter(tenant)
     edge_step = "bothE()"
     if edge_types:
         types = ",".join(f"'{t.strip()}'" for t in edge_types.split(","))
         edge_step = f"bothE({types})"
-    return f"graph.traversal().V({vertex_id}).has('tenant_id', '{tenant}').{edge_step}.limit({limit * 2}).project('edgeLabel','sourceId','targetId','weight').by(label()).by(outV().id()).by(inV().id()).by(coalesce(values('weight'), constant(1.0))).toList()"
+    return f"graph.traversal().V({vertex_id}){tf}.{edge_step}.limit({limit * 2}).project('edgeLabel','sourceId','targetId','weight').by(label()).by(outV().id()).by(inV().id()).by(coalesce(values('weight'), constant(1.0))).toList()"
 
 
 def expand_neighbors_query(
@@ -57,33 +40,36 @@ def expand_neighbors_query(
     limit: int = 50,
     edge_types: str | None = None,
 ) -> str:
+    tf = _tenant_filter(tenant)
     edge_step = "bothE()"
     if edge_types:
         types = ",".join(f"'{t.strip()}'" for t in edge_types.split(","))
         edge_step = f"bothE({types})"
-    return f"graph.traversal().V({vertex_id}).has('tenant_id', '{tenant}').{edge_step}.limit({limit * 2}).otherV().has('tenant_id', '{tenant}').dedup().limit({limit}).elementMap().toList()"
+    return f"graph.traversal().V({vertex_id}){tf}.{edge_step}.limit({limit * 2}).otherV(){tf}.dedup().limit({limit}).elementMap().toList()"
 
 
 def search_query(q: str, tenant: str, limit: int = 20) -> str:
-    """Build a full-text search query using the ES mixed index."""
     escaped = q.replace("'", "\\\\'")
+    tf = _tenant_filter(tenant)
     return f"""
 t = graph.traversal()
-t.V().has('tenant_id', '{tenant}').has('name', textContains('{escaped}')).limit({limit}).elementMap().toList()
+t.V(){tf}.has('name', textContains('{escaped}')).limit({limit}).elementMap().toList()
 """
 
 
 def vertex_detail_query(vertex_id: str, tenant: str) -> str:
-    """Full vertex detail — all properties."""
-    return f"graph.traversal().V({vertex_id}).has('tenant_id', '{tenant}').elementMap().toList()"
+    tf = _tenant_filter(tenant)
+    return f"graph.traversal().V({vertex_id}){tf}.elementMap().toList()"
 
 
 def vertex_count_query(tenant: str) -> str:
-    return f"graph.traversal().V().has('tenant_id', '{tenant}').count()"
+    tf = _tenant_filter(tenant)
+    return f"graph.traversal().V(){tf}.count()"
 
 
 def edge_count_query(tenant: str) -> str:
-    return f"graph.traversal().V().has('tenant_id', '{tenant}').bothE().dedup().count()"
+    tf = _tenant_filter(tenant)
+    return f"graph.traversal().V(){tf}.bothE().dedup().count()"
 
 
 def list_procedures_query() -> str:
@@ -160,11 +146,13 @@ AlgorithmResourceManager.getInstance().execute(graph, program, config).toMap()
 
 
 def overview_nodes_query(tenant: str, limit: int = 50) -> str:
-    return f"graph.traversal().V().has('tenant_id', '{tenant}').limit({limit}).elementMap().toList()"
+    tf = _tenant_filter(tenant)
+    return f"graph.traversal().V(){tf}.limit({limit}).elementMap().toList()"
 
 
 def overview_edges_query(tenant: str, limit: int = 200) -> str:
-    return f"graph.traversal().V().has('tenant_id', '{tenant}').outE().limit({limit}).project('edgeLabel','sourceId','targetId','weight').by(label()).by(outV().id()).by(inV().id()).by(coalesce(values('weight'), constant(1.0))).toList()"
+    tf = _tenant_filter(tenant)
+    return f"graph.traversal().V(){tf}.outE().limit({limit}).project('edgeLabel','sourceId','targetId','weight').by(label()).by(outV().id()).by(inV().id()).by(coalesce(values('weight'), constant(1.0))).toList()"
 
 
 def tenant_list_query() -> str:

@@ -5,7 +5,6 @@ import {
   EyeInvisibleOutlined,
   PushpinOutlined,
   InfoCircleOutlined,
-  BranchesOutlined,
 } from "@ant-design/icons";
 import { useGraphStore } from "../store/graphStore";
 import { expandVertex } from "../api/client";

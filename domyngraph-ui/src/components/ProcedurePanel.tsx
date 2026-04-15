@@ -25,7 +25,7 @@ export default function ProcedurePanel() {
   const [selected, setSelected] = useState<string | null>(null);
   const [params, setParams] = useState<string>("");
   const [running, setRunning] = useState(false);
-  const [result, setResult] = useState<unknown>(null);
+  const [result, setResult] = useState<Record<string, any> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState<number>(0);
 

@@ -20,6 +20,7 @@ from app.gremlin_service import GremlinError, gremlin_service
 from app.jobs import JobStatus, get_job, list_jobs, run_algorithm_job
 from app.models import GraphResponse
 from app.queries import (
+    _tenant_filter,
     algorithm_bfs_query,
     algorithm_cc_query,
     algorithm_pagerank_query,
@@ -113,7 +114,8 @@ async def graph_expand(
             src = str(ed.get("sourceId", ""))
             tgt = str(ed.get("targetId", ""))
             lbl = ed.get("edgeLabel", "RELATED")
-            wt = ed.get("weight", 1.0)
+            raw_wt = ed.get("weight", 1.0)
+            wt = float(raw_wt) if hasattr(raw_wt, "__float__") else raw_wt
             canonical_id = f"{src}-{lbl}-{tgt}"
             edges_list.append(GE(
                 id=canonical_id, source=src, target=tgt,
@@ -187,40 +189,53 @@ async def graph_vertex_detail(
 @app.get("/api/graph/overview", response_model=GraphResponse)
 async def graph_overview(
     tenant: str = Query(..., min_length=1),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(5000, ge=1, le=50000),
 ):
     """Load an overview of the graph — all vertices + edges for a tenant (up to limit)."""
     from app.models import GraphEdge as GE, GraphMeta as GM
 
+    effective_timeout = max(settings.QUERY_TIMEOUT_S, 60)
     node_results = await gremlin_service.submit_async(
-        overview_nodes_query(tenant, limit), timeout_s=settings.QUERY_TIMEOUT_S
+        overview_nodes_query(tenant, limit), timeout_s=effective_timeout
+    )
+    node_resp = gremlin_to_g6(node_results, direction="both")
+    node_ids = {n.id for n in node_resp.nodes}
+
+    if not node_ids:
+        return GraphResponse(nodes=[], edges=[], meta=GM())
+
+    tf = _tenant_filter(tenant)
+    edge_limit = min(limit * 4, 200000)
+    edge_query = (
+        f"graph.traversal().V(){tf}.outE().limit({edge_limit})"
+        f".project('edgeLabel','sourceId','targetId','weight')"
+        f".by(label()).by(outV().id()).by(inV().id())"
+        f".by(coalesce(values('weight'), constant(1.0))).toList()"
     )
     edge_results = await gremlin_service.submit_async(
-        overview_edges_query(tenant, limit * 4), timeout_s=settings.QUERY_TIMEOUT_S
+        edge_query, timeout_s=max(settings.QUERY_TIMEOUT_S, 60)
     )
-
-    node_resp = gremlin_to_g6(node_results, direction="both")
 
     edges_list: list[GE] = []
     for ed in edge_results:
         if isinstance(ed, dict):
             src = str(ed.get("sourceId", ""))
             tgt = str(ed.get("targetId", ""))
+            if src not in node_ids or tgt not in node_ids:
+                continue
             lbl = ed.get("edgeLabel", "RELATED")
-            wt = ed.get("weight", 1.0)
+            raw_wt = ed.get("weight", 1.0)
+            wt = float(raw_wt) if hasattr(raw_wt, "__float__") else raw_wt
             canonical_id = f"{src}-{lbl}-{tgt}"
             edges_list.append(GE(
                 id=canonical_id, source=src, target=tgt,
                 label=lbl, direction="out", properties={"weight": wt},
             ))
 
-    node_ids = {n.id for n in node_resp.nodes}
-    valid_edges = [e for e in edges_list if e.source in node_ids and e.target in node_ids]
-
     return GraphResponse(
         nodes=node_resp.nodes,
-        edges=valid_edges,
-        meta=GM(total_nodes=len(node_resp.nodes), total_edges=len(valid_edges)),
+        edges=edges_list,
+        meta=GM(total_nodes=len(node_resp.nodes), total_edges=len(edges_list)),
     )
 
 
@@ -335,19 +350,26 @@ async def schema_status():
 
 @app.get("/api/tenants")
 async def list_tenants():
+    from app.queries import ALL_TENANT
+
     tenant_ids = await gremlin_service.submit_async(tenant_list_query())
     tenants = []
+
+    total_vc = 0
+    total_ec = 0
     for tid in (tenant_ids if isinstance(tenant_ids, list) else []):
         try:
             vc = await gremlin_service.submit_async(vertex_count_query(str(tid)))
             ec = await gremlin_service.submit_async(edge_count_query(str(tid)))
-            tenants.append({
-                "id": str(tid),
-                "vertex_count": vc[0] if vc else 0,
-                "edge_count": ec[0] if ec else 0,
-            })
+            v = vc[0] if vc else 0
+            e = ec[0] if ec else 0
+            total_vc += v
+            total_ec += e
+            tenants.append({"id": str(tid), "vertex_count": v, "edge_count": e})
         except Exception:
             tenants.append({"id": str(tid), "vertex_count": 0, "edge_count": 0})
+
+    tenants.insert(0, {"id": ALL_TENANT, "vertex_count": total_vc, "edge_count": total_ec})
     return {"tenants": tenants}
 
 
@@ -382,3 +404,63 @@ async def health():
 @app.get("/api/cache/stats")
 async def get_cache_stats():
     return cache_stats()
+
+
+# ──────────────────────────────────────────────────
+#  Gremlin Query Console
+# ──────────────────────────────────────────────────
+
+
+class GremlinQueryRequest(BaseModel):
+    query: str
+    timeout_s: int = 30
+
+
+@app.post("/api/gremlin/query")
+async def gremlin_query(req: GremlinQueryRequest):
+    """Execute a raw Gremlin query and return the results.
+
+    Restricted to read-only traversals in practice -- the UI should warn
+    users about mutations, but we don't enforce it server-side to keep the
+    console useful for debugging.
+    """
+    if not req.query.strip():
+        raise HTTPException(status_code=400, detail="Query cannot be empty")
+    if len(req.query) > 5000:
+        raise HTTPException(status_code=400, detail="Query too long (max 5000 chars)")
+
+    query = req.query.strip()
+    if query.startswith("g."):
+        query = "graph.traversal()." + query[2:]
+
+    t0 = time.time()
+    try:
+        result = await gremlin_service.submit_async(
+            query, timeout_s=min(req.timeout_s, 60)
+        )
+        elapsed = round((time.time() - t0) * 1000, 1)
+        serializable = _make_serializable(result)
+        return {
+            "result": serializable,
+            "count": len(serializable) if isinstance(serializable, list) else 1,
+            "elapsed_ms": elapsed,
+        }
+    except Exception as exc:
+        elapsed = round((time.time() - t0) * 1000, 1)
+        raise HTTPException(
+            status_code=400,
+            detail={"error": str(exc)[:500], "elapsed_ms": elapsed},
+        )
+
+
+def _make_serializable(obj: Any) -> Any:
+    """Convert Gremlin result objects into JSON-safe structures."""
+    if obj is None:
+        return None
+    if isinstance(obj, (str, int, float, bool)):
+        return obj
+    if isinstance(obj, dict):
+        return {str(k): _make_serializable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_make_serializable(item) for item in obj]
+    return str(obj)

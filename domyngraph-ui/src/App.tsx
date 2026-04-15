@@ -1,5 +1,6 @@
-import { useEffect } from "react";
-import { Layout, Tabs, Typography, Space, theme } from "antd";
+import { useEffect, useState } from "react";
+import { Layout, Tabs, Typography, Space, Spin, Tag, theme } from "antd";
+import { LoadingOutlined } from "@ant-design/icons";
 import {
   NodeIndexOutlined,
   ExperimentOutlined,
@@ -7,6 +8,7 @@ import {
   TeamOutlined,
   HeartOutlined,
   ThunderboltOutlined,
+  CodeOutlined,
 } from "@ant-design/icons";
 import GraphCanvas from "./components/GraphCanvas";
 import Toolbar from "./components/Toolbar";
@@ -19,6 +21,7 @@ import SchemaPanel from "./components/SchemaPanel";
 import TenantPanel from "./components/TenantPanel";
 import HealthPanel from "./components/HealthPanel";
 import ContextMenu from "./components/ContextMenu";
+import QueryConsole from "./components/QueryConsole";
 import { useGraphStore } from "./store/graphStore";
 import { loadInitialGraph } from "./api/client";
 
@@ -29,9 +32,14 @@ export default function App() {
   const addGraphData = useGraphStore((s) => s.addGraphData);
   const activeTenant = useGraphStore((s) => s.activeTenant);
   const setFocus = useGraphStore((s) => s.setFocus);
+  const viewGraph = useGraphStore((s) => s.viewGraph);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
+    setLoading(true);
+    setLoadError(null);
     (async () => {
       try {
         const resp = await loadInitialGraph(activeTenant);
@@ -39,8 +47,11 @@ export default function App() {
           addGraphData(resp);
           setFocus(resp.nodes[0].id);
         }
-      } catch (err) {
+      } catch (err: any) {
+        if (!cancelled) setLoadError(err?.message || "Load failed");
         console.warn("Initial graph load failed:", err);
+      } finally {
+        if (!cancelled) setLoading(false);
       }
     })();
     return () => { cancelled = true; };
@@ -85,6 +96,31 @@ export default function App() {
           <div style={{ flex: 1, position: "relative" }}>
             <GraphCanvas />
             <ContextMenu />
+            {loading && (
+              <div style={{
+                position: "absolute", inset: 0, display: "flex",
+                alignItems: "center", justifyContent: "center",
+                background: "rgba(255,255,255,0.8)", zIndex: 100,
+              }}>
+                <Spin indicator={<LoadingOutlined style={{ fontSize: 32 }} />} tip="Loading graph..." />
+              </div>
+            )}
+            {loadError && (
+              <div style={{
+                position: "absolute", top: 8, left: "50%", transform: "translateX(-50%)", zIndex: 101,
+              }}>
+                <Tag color="error">{loadError}</Tag>
+              </div>
+            )}
+            {!loading && viewGraph.nodes.size > 0 && (
+              <div style={{
+                position: "absolute", bottom: 8, left: 8, zIndex: 50,
+                fontSize: 11, color: "#999", background: "rgba(255,255,255,0.9)",
+                padding: "2px 8px", borderRadius: 4,
+              }}>
+                {viewGraph.nodes.size.toLocaleString()} nodes / {viewGraph.edges.size.toLocaleString()} edges
+              </div>
+            )}
           </div>
         </Content>
 
@@ -107,6 +143,12 @@ export default function App() {
                 label: "Detail",
                 icon: <NodeIndexOutlined />,
                 children: <DetailPanel />,
+              },
+              {
+                key: "query",
+                label: "Query",
+                icon: <CodeOutlined />,
+                children: <div style={{ padding: 12, height: "calc(100vh - 120px)" }}><QueryConsole /></div>,
               },
               {
                 key: "procedures",
