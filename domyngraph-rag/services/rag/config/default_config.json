@@ -1,0 +1,41 @@
+{
+  "_comment": "DomynGraph RAG Service Configuration",
+
+  "dataset_config": {
+    "dataset_type": "generic"
+  },
+
+  "collection_config": {
+    "chunk_collection_name": "domyngraph_chunks",
+    "triplet_collection_name": "domyngraph_triplets"
+  },
+
+  "retrieval_config": {
+    "bm25_weight": 0.75,
+    "enable_reranking": false
+  },
+
+  "vector_rag_config": {
+    "n_chunks": 5
+  },
+
+  "graph_rag_config": {
+    "n_triplets": 10,
+    "graph_chunk_mapping_path": "./data/graph_rag_output/chunk_text.csv"
+  },
+
+  "hybrid_rag_config": {
+    "n_chunks": 5,
+    "n_triplets": 10
+  },
+
+  "prompt_config": {
+    "domain_description": "knowledge graphs and document analysis",
+    "domain_info": "structured information",
+    "document_type": "documents",
+    "entity_properties": "page_id: str, chunk_id: str, source_file: str",
+    "relationship_properties": "page_id: str, chunk_id: str, source_file: str",
+    "dataset_specific_requirements": "Use textContains() for flexible matching via Elasticsearch mixed index. Prefer broader queries that can handle variations in entity names.",
+    "schema_based_examples": "Example: g.V().hasLabel('Entity').has('name', textContains('company name')).bothE('RELATION').as('r').otherV().as('v').select('r','v').by(elementMap()).limit(20).toList()"
+  }
+}

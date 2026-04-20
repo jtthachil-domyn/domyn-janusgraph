@@ -49,7 +49,7 @@ export async function getVertexDetail(
 }
 
 export async function loadInitialGraph(tenant: string, limit?: number): Promise<GraphResponse> {
-  const effectiveLimit = limit ?? (tenant === "__ALL__" ? 3000 : 5000);
+  const effectiveLimit = limit ?? (tenant === "__ALL__" ? 1000 : 3000);
   return request<GraphResponse>(`/api/graph/overview?tenant=${tenant}&limit=${effectiveLimit}`);
 }
 

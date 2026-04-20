@@ -57,3 +57,5 @@ __pycache__/
 .venv/
 node_modules/
 UNDERSTANDING_DOMYNGRAPH.md
+.env
+domyngraph-docker/.env

@@ -9,6 +9,8 @@ import {
   HeartOutlined,
   ThunderboltOutlined,
   CodeOutlined,
+  CloudUploadOutlined,
+  RobotOutlined,
 } from "@ant-design/icons";
 import GraphCanvas from "./components/GraphCanvas";
 import Toolbar from "./components/Toolbar";
@@ -22,6 +24,8 @@ import TenantPanel from "./components/TenantPanel";
 import HealthPanel from "./components/HealthPanel";
 import ContextMenu from "./components/ContextMenu";
 import QueryConsole from "./components/QueryConsole";
+import IngestPanel from "./components/IngestPanel";
+import RAGPanel from "./components/RAGPanel";
 import { useGraphStore } from "./store/graphStore";
 import { loadInitialGraph } from "./api/client";
 
@@ -179,6 +183,18 @@ export default function App() {
                 label: "Health",
                 icon: <HeartOutlined />,
                 children: <HealthPanel />,
+              },
+              {
+                key: "ingest",
+                label: "Ingest",
+                icon: <CloudUploadOutlined />,
+                children: <IngestPanel />,
+              },
+              {
+                key: "rag",
+                label: "RAG",
+                icon: <RobotOutlined />,
+                children: <RAGPanel />,
               },
             ]}
           />

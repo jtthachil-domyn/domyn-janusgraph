@@ -43,6 +43,11 @@ scriptEngines: {
       org.apache.tinkerpop.gremlin.tinkergraph.jsr223.TinkerGraphGremlinPlugin: {},
       org.apache.tinkerpop.gremlin.jsr223.ImportGremlinPlugin: {classImports: [java.lang.Math], methodImports: [java.lang.Math#*]},
       org.apache.tinkerpop.gremlin.jsr223.ScriptFileGremlinPlugin: {files: [/opt/janusgraph/scripts/init-schema.groovy]}
+    },
+    config: {
+      compilerCustomizerProviders: {
+        org.apache.tinkerpop.gremlin.groovy.jsr223.TimedInterruptCustomizerProvider: {interruptionTimeout: 60000}
+      }
     }
   }
 }

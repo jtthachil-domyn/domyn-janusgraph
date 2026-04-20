@@ -73,7 +73,7 @@ services:
       elasticsearch:
         condition: service_healthy
     environment:
-      - JAVA_OPTIONS=-Xms1G -Xmx2G
+      - JAVA_OPTIONS=-Xms2G -Xmx4G -XX:MaxMetaspaceSize=512m -XX:+UseG1GC -XX:G1HeapRegionSize=16m -XX:MaxGCPauseMillis=200 -XX:+ClassUnloadingWithConcurrentMark
       - JANUS_PROPS_TEMPLATE=cql-es
       - janusgraph.storage.hostname=cassandra
       - janusgraph.storage.port=9042
@@ -126,6 +126,64 @@ services:
     networks:
       - domyn-net
 
+  domyngraph-ingest:
+    build:
+      context: ../domyngraph-rag
+      dockerfile: Dockerfile.ingest
+    container_name: domyn-ingest
+    ports:
+      - "8081:8081"
+    depends_on:
+      janusgraph:
+        condition: service_healthy
+    environment:
+      - LLM_BASE_URL=${LLM_BASE_URL}
+      - LLM_API_KEY=${LLM_API_KEY}
+      - LLM_MODEL=${LLM_MODEL}
+      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL}
+      - EMBEDDING_API_KEY=${EMBEDDING_API_KEY}
+      - GREMLIN_URL=ws://janusgraph:8182/gremlin
+      - GRAPH_ALIAS=graph
+      - CHROMA_PERSIST_DIR=/app/data/chroma
+      - BM25_PERSIST_DIR=/app/data/bm25
+      - GRAPH_RAG_OUTPUT_DIR=/app/data/graph_rag_output
+      - CORS_ORIGIN=http://localhost:3000
+    volumes:
+      - rag-data:/app/data
+    networks:
+      - domyn-net
+
+  domyngraph-rag:
+    build:
+      context: ../domyngraph-rag
+      dockerfile: Dockerfile.rag
+    container_name: domyn-rag
+    ports:
+      - "8083:8083"
+    depends_on:
+      janusgraph:
+        condition: service_healthy
+    environment:
+      - LLM_BASE_URL=${LLM_BASE_URL}
+      - LLM_API_KEY=${LLM_API_KEY}
+      - LLM_MODEL=${LLM_MODEL}
+      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL}
+      - EMBEDDING_API_KEY=${EMBEDDING_API_KEY}
+      - GREMLIN_URL=ws://janusgraph:8182/gremlin
+      - GRAPH_ALIAS=graph
+      - CHROMA_PERSIST_DIR=/app/data/chroma
+      - BM25_PERSIST_DIR=/app/data/bm25
+      - GRAPH_CHUNK_MAPPING_CSV=/app/data/graph_rag_output/chunk_text.csv
+      - ENTITY_SCHEMA=Entity, Chunk, Document, Concept
+      - RELATIONSHIP_SCHEMA=RELATION, CONTAINS, REFERENCES, SIMILAR_TO
+      - CORS_ORIGIN=http://localhost:3000
+    volumes:
+      - rag-data:/app/data
+    networks:
+      - domyn-net
+
   domyngraph-ui:
     build:
       context: ../domyngraph-ui
@@ -136,12 +194,17 @@ services:
     depends_on:
       domyngraph-api:
         condition: service_healthy
+    environment:
+      - VITE_API_URL=http://localhost:8080
+      - VITE_INGEST_URL=http://localhost:8081
+      - VITE_RAG_URL=http://localhost:8083
     networks:
       - domyn-net
 
 volumes:
   cassandra-data:
   es-data:
+  rag-data:
 
 networks:
   domyn-net:

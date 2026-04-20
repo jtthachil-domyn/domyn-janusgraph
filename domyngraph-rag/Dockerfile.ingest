@@ -1,0 +1,14 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY pyproject.toml .
+RUN pip install --no-cache-dir uv && uv pip install --system -r pyproject.toml 2>/dev/null || pip install --no-cache-dir fastapi uvicorn gremlinpython httpx pydantic chromadb sentence-transformers rank-bm25 pandas pymupdf toml python-multipart openai numpy
+
+COPY packages/ packages/
+COPY services/ingest/ services/ingest/
+
+RUN mkdir -p data/uploads data/kg_output data/chroma data/bm25 data/graph_rag_output
+
+EXPOSE 8081
+CMD ["python", "-m", "uvicorn", "services.ingest.main:app", "--host", "0.0.0.0", "--port", "8081"]
