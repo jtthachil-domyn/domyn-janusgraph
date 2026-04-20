@@ -7,3 +7,4 @@ Cargo.lock
 
 # Reference repos are gitignored -- they're local-only for reading
 /references/
+docs/tech-stack-slide-deck.md
