@@ -1,0 +1,16 @@
+[package]
+name = "nexus-tenant"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Namespace-level multi-tenancy and schema versioning for Domyn Nexus"
+
+[dependencies]
+nexus-core = { workspace = true }
+nexus-storage = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

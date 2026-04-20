@@ -1,0 +1,29 @@
+[package]
+name = "nexus-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Benchmark suite for Domyn Nexus (port of B1-B13 from JanusGraph benchmarks)"
+
+[dependencies]
+nexus-core = { workspace = true }
+nexus-algebra = { workspace = true }
+nexus-storage = { workspace = true }
+nexus-cypher = { workspace = true }
+nexus-index = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dependencies.walkdir]
+version = "2"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bin]]
+name = "real_data_bench"
+path = "src/bin/real_data_bench.rs"
+
+[[bench]]
+name = "nexus_bench"
+harness = false

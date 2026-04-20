@@ -1,0 +1,17 @@
+[package]
+name = "nexus-cypher"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "openCypher parser, query planner, and executor for Domyn Nexus"
+
+[dependencies]
+nexus-core = { workspace = true }
+nexus-algebra = { workspace = true }
+nexus-index = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

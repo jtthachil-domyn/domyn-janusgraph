@@ -1,0 +1,9 @@
+/target
+**/*.rs.bk
+Cargo.lock
+*.swp
+*.swo
+.DS_Store
+
+# Reference repos are gitignored -- they're local-only for reading
+/references/

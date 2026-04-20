@@ -1,0 +1,12 @@
+[package]
+name = "nexus-algorithms"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Graph algorithms as GraphBLAS semiring operations for Domyn Nexus"
+
+[dependencies]
+nexus-core = { workspace = true }
+nexus-algebra = { workspace = true }
+rayon = { workspace = true }
+tracing = { workspace = true }

@@ -1,0 +1,21 @@
+[package]
+name = "nexus-python"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Python SDK for Domyn Nexus via PyO3 — direct embedding in GraphRAG pipelines"
+
+[lib]
+name = "domyn_nexus"
+crate-type = ["cdylib"]
+
+[dependencies]
+nexus-core = { workspace = true }
+nexus-algebra = { workspace = true }
+nexus-cypher = { workspace = true }
+nexus-index = { workspace = true }
+nexus-algorithms = { workspace = true }
+pyo3 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+parking_lot = { workspace = true }

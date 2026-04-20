@@ -1,0 +1,12 @@
+[package]
+name = "nexus-parser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Parser adapter experiments for Domyn Nexus, including external openCypher frontends"
+
+[dependencies]
+nexus-cypher = { workspace = true }
+thiserror = { workspace = true }
+kyu-parser = "0.3.0"
+smol_str = "0.3.6"

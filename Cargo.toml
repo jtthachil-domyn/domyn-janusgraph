@@ -1,0 +1,93 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/nexus-core",
+    "crates/nexus-algebra",
+    "crates/nexus-storage",
+    "crates/nexus-cypher",
+    "crates/nexus-parser",
+    "crates/nexus-index",
+    "crates/nexus-tenant",
+    "crates/nexus-algorithms",
+    "crates/nexus-server",
+    "crates/nexus-distributed",
+    "crates/nexus-python",
+    "crates/nexus-bench",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/jtthachil-domyn/domyn-nexus"
+
+[workspace.dependencies]
+# Internal crates
+nexus-core = { path = "crates/nexus-core" }
+nexus-algebra = { path = "crates/nexus-algebra" }
+nexus-storage = { path = "crates/nexus-storage" }
+nexus-cypher = { path = "crates/nexus-cypher" }
+nexus-parser = { path = "crates/nexus-parser" }
+nexus-index = { path = "crates/nexus-index" }
+nexus-tenant = { path = "crates/nexus-tenant" }
+nexus-algorithms = { path = "crates/nexus-algorithms" }
+nexus-server = { path = "crates/nexus-server" }
+nexus-distributed = { path = "crates/nexus-distributed" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Data parallelism (SpMV, graph algorithms)
+rayon = "1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging / tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Persistence
+redb = "2"
+
+# Full-text search
+tantivy = "0.22"
+
+# HTTP / gRPC
+axum = "0.8"
+tonic = "0.13"
+
+# Hashing
+ahash = "0.8"
+rustc-hash = "2"
+
+# Bytes / memory
+bytes = "1"
+memmap2 = "0.9"
+
+# Python bindings
+pyo3 = { version = "0.24", features = ["extension-module", "abi3-py39"] }
+
+# Checksums
+crc32fast = "1"
+
+# Misc
+parking_lot = "0.12"
+crossbeam = "0.8"
+dashmap = "6"
+smallvec = "1"
+bitflags = "2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+
+[profile.bench]
+inherits = "release"
+debug = true
