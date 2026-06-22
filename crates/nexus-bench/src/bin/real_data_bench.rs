@@ -4,6 +4,7 @@
 //!
 //! Usage:
 //!   cargo run -p nexus-bench --release --bin real_data_bench
+//!   cargo run -p nexus-bench --release --bin real_data_bench -- --assert-internal-beta
 
 use nexus_bench::real_data_loader::{
     build_graph_from_parsed, load_real_data, parse_all_tickers, parse_single_ticker,
@@ -13,12 +14,19 @@ use nexus_core::types::{Direction, Value, VertexId};
 use nexus_cypher::executor::run_cypher_with_indexes;
 use nexus_index::composite::IndexSet;
 use std::collections::HashMap;
+use std::env;
 use std::hint::black_box;
+use std::process::ExitCode;
 use std::time::Instant;
 
 const ITERATIONS: usize = 10;
 const COLD_RUNS: usize = 1;
 const WARM_RUNS: usize = 2;
+
+const B1_BASELINE_MS: f64 = 1.10;
+const B2_BASELINE_MS: f64 = 70.19;
+const B1_B2_ALLOWED_REGRESSION_MULTIPLE: f64 = 2.0;
+const B9_INTERNAL_BETA_P50_MS: f64 = 2.0;
 
 struct BenchResult {
     name: String,
@@ -505,7 +513,8 @@ fn format_ms(ms: f64) -> String {
     }
 }
 
-fn main() {
+fn main() -> ExitCode {
+    let args = BenchArgs::parse();
     eprintln!("=== Domyn Nexus Real-Data Benchmark ===");
     eprintln!("Same dataset as JanusGraph/Neo4j: 18 tickers, ~47.5K V, ~64.9K E");
     eprintln!(
@@ -733,4 +742,153 @@ fn main() {
         data.stats.build_time_ms,
         idx_time.as_secs_f64() * 1000.0
     );
+
+    if args.assert_internal_beta {
+        match assert_internal_beta_thresholds(&results) {
+            Ok(()) => {
+                println!("\nInternal Beta benchmark thresholds: PASS");
+            }
+            Err(failures) => {
+                eprintln!("\nInternal Beta benchmark thresholds: FAIL");
+                for failure in failures {
+                    eprintln!("- {failure}");
+                }
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    ExitCode::SUCCESS
+}
+
+#[derive(Debug, Default)]
+struct BenchArgs {
+    assert_internal_beta: bool,
+}
+
+impl BenchArgs {
+    fn parse() -> Self {
+        let mut args = Self::default();
+        for arg in env::args().skip(1) {
+            match arg.as_str() {
+                "--assert-internal-beta" => args.assert_internal_beta = true,
+                "--help" | "-h" => {
+                    print_help();
+                    std::process::exit(0);
+                }
+                other => {
+                    eprintln!("unknown argument: {other}");
+                    print_help();
+                    std::process::exit(2);
+                }
+            }
+        }
+        args
+    }
+}
+
+fn print_help() {
+    println!(
+        "Usage: real_data_bench [--assert-internal-beta]\n\n\
+         --assert-internal-beta  fail if B1-B10 regress past Internal Beta thresholds"
+    );
+}
+
+fn assert_internal_beta_thresholds(results: &[BenchResult]) -> Result<(), Vec<String>> {
+    let mut failures = Vec::new();
+
+    assert_threshold(
+        results,
+        "B1: Single Load",
+        B1_BASELINE_MS * B1_B2_ALLOWED_REGRESSION_MULTIPLE,
+        "B1 must remain within 2x the June 2 Nexus p50 baseline",
+        &mut failures,
+    );
+    assert_threshold(
+        results,
+        "B2: Bulk Load",
+        B2_BASELINE_MS * B1_B2_ALLOWED_REGRESSION_MULTIPLE,
+        "B2 must remain within 2x the June 2 Nexus p50 baseline",
+        &mut failures,
+    );
+    assert_threshold(
+        results,
+        "B3: Point Lookup (Cypher+idx)",
+        0.92,
+        "B3 must remain faster than the recorded Neo4j p50",
+        &mut failures,
+    );
+    assert_threshold(
+        results,
+        "B5: 1-Hop (Cypher+idx)",
+        26.4,
+        "B5 must remain faster than the recorded Neo4j p50",
+        &mut failures,
+    );
+    assert_threshold(
+        results,
+        "B6: 2-Hop (Cypher+idx)",
+        11.5,
+        "B6 must remain faster than the recorded Neo4j p50",
+        &mut failures,
+    );
+    assert_threshold(
+        results,
+        "B7: Filtered (Cypher+idx)",
+        18.9,
+        "B7 must remain faster than the recorded Neo4j p50",
+        &mut failures,
+    );
+    assert_threshold(
+        results,
+        "B8: Count By Type (Cypher)",
+        3.4,
+        "B8 must remain faster than the recorded Neo4j p50",
+        &mut failures,
+    );
+    assert_threshold(
+        results,
+        "B9: Top Connected (Cypher)",
+        B9_INTERNAL_BETA_P50_MS,
+        "B9 must remain below the Internal Beta p50 target",
+        &mut failures,
+    );
+    assert_threshold(
+        results,
+        "B10: Tenant Isolation (Cypher)",
+        1.2,
+        "B10 must remain faster than the recorded Neo4j p50",
+        &mut failures,
+    );
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures)
+    }
+}
+
+fn assert_threshold(
+    results: &[BenchResult],
+    name_or_prefix: &str,
+    max_p50_ms: f64,
+    reason: &str,
+    failures: &mut Vec<String>,
+) {
+    let Some(result) = results
+        .iter()
+        .find(|r| r.name == name_or_prefix || r.name.starts_with(name_or_prefix))
+    else {
+        failures.push(format!("missing benchmark result: {name_or_prefix}"));
+        return;
+    };
+
+    if result.p50_ms > max_p50_ms {
+        failures.push(format!(
+            "{} p50 {} exceeded threshold {} ({reason})",
+            result.name,
+            format_ms(result.p50_ms),
+            format_ms(max_p50_ms)
+        ));
+    }
 }

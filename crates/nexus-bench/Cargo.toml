@@ -24,6 +24,14 @@ criterion = { version = "0.5", features = ["html_reports"] }
 name = "real_data_bench"
 path = "src/bin/real_data_bench.rs"
 
+[[bin]]
+name = "graphrag_retrieval_bench"
+path = "src/bin/graphrag_retrieval_bench.rs"
+
+[[bin]]
+name = "finreflectkg_demo_loader"
+path = "src/bin/finreflectkg_demo_loader.rs"
+
 [[bench]]
 name = "nexus_bench"
 harness = false
