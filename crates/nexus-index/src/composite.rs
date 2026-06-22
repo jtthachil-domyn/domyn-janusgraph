@@ -9,6 +9,7 @@
 use ahash::AHashMap;
 use nexus_core::types::VertexId;
 use std::collections::HashSet;
+use std::mem::size_of;
 
 /// A non-unique composite index: one key maps to many vertex IDs.
 /// Used for tenant_id, entity_type, name, etc.
@@ -66,6 +67,16 @@ impl CompositeIndex {
 
     pub fn num_keys(&self) -> usize {
         self.map.len()
+    }
+
+    pub fn estimated_heap_bytes(&self) -> usize {
+        self.name.capacity()
+            + self.map.capacity() * size_of::<(String, HashSet<u64>)>()
+            + self
+                .map
+                .iter()
+                .map(|(key, set)| key.capacity() + set.capacity() * size_of::<u64>())
+                .sum::<usize>()
     }
 }
 
@@ -142,6 +153,14 @@ impl UniqueIndex {
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
+
+    pub fn estimated_heap_bytes(&self) -> usize {
+        self.name.capacity()
+            + self.map.capacity() * size_of::<(String, u64)>()
+            + self.map.keys().map(String::capacity).sum::<usize>()
+            + self.reverse.capacity() * size_of::<(u64, String)>()
+            + self.reverse.values().map(String::capacity).sum::<usize>()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -211,6 +230,21 @@ impl IndexSet {
             .iter()
             .enumerate()
             .find(|(_, idx)| idx.name() == name)
+    }
+
+    pub fn estimated_heap_bytes(&self) -> usize {
+        self.composite.capacity() * size_of::<CompositeIndex>()
+            + self
+                .composite
+                .iter()
+                .map(CompositeIndex::estimated_heap_bytes)
+                .sum::<usize>()
+            + self.unique.capacity() * size_of::<UniqueIndex>()
+            + self
+                .unique
+                .iter()
+                .map(UniqueIndex::estimated_heap_bytes)
+                .sum::<usize>()
     }
 }
 
@@ -282,5 +316,22 @@ mod tests {
         assert!(set.find_composite("by_tenant").is_some());
         assert!(set.find_unique("by_external_id").is_some());
         assert!(set.find_composite("nonexistent").is_none());
+    }
+
+    #[test]
+    fn index_set_estimated_heap_bytes_tracks_owned_entries() {
+        let mut set = IndexSet::new();
+        let comp = set.add_composite("tenant_id");
+        let unique = set.add_unique("external_id");
+        let empty = set.estimated_heap_bytes();
+
+        set.composite_mut(comp).unwrap().insert("NVDA", VertexId(1));
+        set.composite_mut(comp).unwrap().insert("NVDA", VertexId(2));
+        set.unique_mut(unique)
+            .unwrap()
+            .insert("NVDA:entity:001", VertexId(1))
+            .unwrap();
+
+        assert!(set.estimated_heap_bytes() > empty);
     }
 }

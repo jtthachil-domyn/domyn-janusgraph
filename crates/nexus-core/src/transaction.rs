@@ -25,6 +25,10 @@ pub enum WriteOp {
         key: String,
         value: Value,
     },
+    SetVertexLabel {
+        vertex: VertexId,
+        label: String,
+    },
     AddEdge {
         edge_id: EdgeId,
         source: VertexId,
@@ -151,6 +155,13 @@ impl<'a> WriteTx<'a> {
         });
     }
 
+    pub fn set_vertex_label(&mut self, vertex: VertexId, label: &str) {
+        self.ops.push(WriteOp::SetVertexLabel {
+            vertex,
+            label: label.to_string(),
+        });
+    }
+
     pub fn add_edge(&mut self, source: VertexId, target: VertexId, label: &str) -> EdgeId {
         let edge_id = EdgeId(self.next_edge_id);
         self.next_edge_id += 1;
@@ -202,6 +213,9 @@ impl<'a> WriteTx<'a> {
                 }
                 WriteOp::SetVertexProperty { vertex, key, value } => {
                     staged.try_set_vertex_property(*vertex, key, value.clone())?;
+                }
+                WriteOp::SetVertexLabel { vertex, label } => {
+                    staged.try_set_vertex_label(*vertex, label)?;
                 }
                 WriteOp::AddEdge {
                     edge_id,
@@ -469,6 +483,46 @@ mod tests {
     }
 
     #[test]
+    fn uncommitted_write_tx_is_invisible_to_readers() {
+        let tg = setup();
+
+        let mut wtx = tg.begin_write();
+        let bob = wtx.add_vertex("Entity");
+        wtx.set_vertex_property(bob, "name", Value::String("Bob".into()));
+
+        let rtx = tg.begin_read();
+        assert_eq!(rtx.graph().num_vertices(), 1);
+        assert_eq!(rtx.graph().get_vertex_property(bob, "name"), Value::Null);
+
+        drop(rtx);
+        wtx.abort();
+    }
+
+    #[test]
+    fn prepared_write_tx_is_invisible_until_publish_commit() {
+        let tg = setup();
+
+        let mut wtx = tg.begin_write();
+        let bob = wtx.add_vertex("Entity");
+        wtx.set_vertex_property(bob, "name", Value::String("Bob".into()));
+        let prepared = wtx.prepare().unwrap();
+
+        let rtx = tg.begin_read();
+        assert_eq!(rtx.graph().num_vertices(), 1);
+        assert_eq!(rtx.graph().get_vertex_property(bob, "name"), Value::Null);
+
+        drop(rtx);
+        prepared.commit().unwrap();
+
+        let committed = tg.begin_read();
+        assert_eq!(committed.graph().num_vertices(), 2);
+        assert_eq!(
+            committed.graph().get_vertex_property(bob, "name"),
+            Value::String("Bob".into())
+        );
+    }
+
+    #[test]
     fn failed_commit_does_not_partially_apply_ops() {
         let tg = setup();
 
@@ -528,5 +582,17 @@ mod tests {
                 .is_empty()
         );
         assert!(!rtx.graph().edge_exists(edge));
+    }
+
+    #[test]
+    fn write_tx_can_set_vertex_labels_atomically() {
+        let tg = setup();
+
+        let mut wtx = tg.begin_write();
+        wtx.set_vertex_label(VertexId(0), "Entity:Person");
+        wtx.commit().unwrap();
+
+        let rtx = tg.begin_read();
+        assert_eq!(rtx.graph().vertex_label(VertexId(0)), Some("Entity:Person"));
     }
 }

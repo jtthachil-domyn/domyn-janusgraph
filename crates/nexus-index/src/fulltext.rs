@@ -8,8 +8,8 @@ use nexus_core::types::VertexId;
 use std::path::Path;
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
-use tantivy::schema::{Field, STORED, Schema, TEXT, Value};
-use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyError, doc};
+use tantivy::schema::{Field, INDEXED, STORED, Schema, TEXT, Value};
+use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyError, Term, doc};
 
 pub struct FullTextIndex {
     index: Index,
@@ -22,7 +22,7 @@ pub struct FullTextIndex {
 impl FullTextIndex {
     pub fn create_in_memory() -> Result<Self, TantivyError> {
         let mut schema_builder = Schema::builder();
-        let vertex_id_field = schema_builder.add_u64_field("vertex_id", STORED);
+        let vertex_id_field = schema_builder.add_u64_field("vertex_id", INDEXED | STORED);
         let text_field = schema_builder.add_text_field("text", TEXT | STORED);
         let schema = schema_builder.build();
 
@@ -44,7 +44,7 @@ impl FullTextIndex {
 
     pub fn create_on_disk(path: impl AsRef<Path>) -> Result<Self, TantivyError> {
         let mut schema_builder = Schema::builder();
-        let vertex_id_field = schema_builder.add_u64_field("vertex_id", STORED);
+        let vertex_id_field = schema_builder.add_u64_field("vertex_id", INDEXED | STORED);
         let text_field = schema_builder.add_text_field("text", TEXT | STORED);
         let schema = schema_builder.build();
 
@@ -72,6 +72,28 @@ impl FullTextIndex {
             self.vertex_id_field => vertex_id.0,
             self.text_field => text,
         ))?;
+        Ok(())
+    }
+
+    /// Replace a vertex's indexed text.
+    ///
+    /// Tantivy applies deletes at commit time, so callers should call
+    /// `commit()` after a batch of updates before expecting readers to observe
+    /// the new state.
+    pub fn update(&self, vertex_id: VertexId, text: &str) -> Result<(), TantivyError> {
+        let writer = self.writer.lock();
+        writer.delete_term(Term::from_field_u64(self.vertex_id_field, vertex_id.0));
+        writer.add_document(doc!(
+            self.vertex_id_field => vertex_id.0,
+            self.text_field => text,
+        ))?;
+        Ok(())
+    }
+
+    /// Remove a vertex from the full-text index.
+    pub fn remove(&self, vertex_id: VertexId) -> Result<(), TantivyError> {
+        let writer = self.writer.lock();
+        writer.delete_term(Term::from_field_u64(self.vertex_id_field, vertex_id.0));
         Ok(())
     }
 
@@ -128,5 +150,34 @@ mod tests {
 
         let results = idx.search("revenue", 10).unwrap();
         assert!(results.contains(&VertexId(1)));
+    }
+
+    #[test]
+    fn fulltext_index_update_replaces_stale_text() {
+        let idx = FullTextIndex::create_in_memory().unwrap();
+
+        idx.add(VertexId(42), "old apple filing").unwrap();
+        idx.commit().unwrap();
+        assert!(idx.search("apple", 10).unwrap().contains(&VertexId(42)));
+
+        idx.update(VertexId(42), "new nvidia filing").unwrap();
+        idx.commit().unwrap();
+
+        assert!(!idx.search("apple", 10).unwrap().contains(&VertexId(42)));
+        assert!(idx.search("nvidia", 10).unwrap().contains(&VertexId(42)));
+    }
+
+    #[test]
+    fn fulltext_index_remove_hides_deleted_vertex() {
+        let idx = FullTextIndex::create_in_memory().unwrap();
+
+        idx.add(VertexId(7), "delete me from search").unwrap();
+        idx.commit().unwrap();
+        assert!(idx.search("delete", 10).unwrap().contains(&VertexId(7)));
+
+        idx.remove(VertexId(7)).unwrap();
+        idx.commit().unwrap();
+
+        assert!(!idx.search("delete", 10).unwrap().contains(&VertexId(7)));
     }
 }

@@ -10,6 +10,7 @@
 
 use crate::types::{Direction, EdgeId, LabelId, VertexId};
 use std::collections::HashMap;
+use std::mem::size_of;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +102,12 @@ impl CsrMatrix {
         let end = self.offsets[idx + 1] as usize;
         &self.edge_ids[start..end]
     }
+
+    pub fn estimated_heap_bytes(&self) -> usize {
+        self.offsets.capacity() * size_of::<u64>()
+            + self.neighbors.capacity() * size_of::<u64>()
+            + self.edge_ids.capacity() * size_of::<u64>()
+    }
 }
 
 /// Builder that accumulates edges and produces a finalized `CsrMatrix`.
@@ -135,6 +142,10 @@ impl CsrBuilder {
 
     pub fn set_num_vertices(&mut self, num_vertices: usize) {
         self.num_vertices = num_vertices;
+    }
+
+    pub fn estimated_heap_bytes(&self) -> usize {
+        self.edges.capacity() * size_of::<(u64, u64, u64)>()
     }
 
     /// Build the CSR matrix. Sorts edges by source vertex for CSR layout.
@@ -369,6 +380,18 @@ impl AdjacencyStore {
         self.edge_meta.get(&edge_id.0).copied()
     }
 
+    pub fn tombstoned_edge_count(&self) -> usize {
+        self.edge_meta.values().filter(|meta| meta.deleted).count()
+    }
+
+    pub fn live_edge_count(&self) -> usize {
+        self.edge_meta.values().filter(|meta| !meta.deleted).count()
+    }
+
+    pub fn delta_edge_count(&self) -> usize {
+        self.delta_forward.values().map(Vec::len).sum()
+    }
+
     pub fn incident_edges(&self, vertex: VertexId) -> Vec<EdgeId> {
         let Some(incident) = self.incident_by_vertex.get(vertex.0 as usize) else {
             return Vec::new();
@@ -424,8 +447,133 @@ impl AdjacencyStore {
         result
     }
 
+    pub fn degree(&self, vertex: VertexId, label: LabelId, direction: Direction) -> usize {
+        let vid = vertex.0;
+        let mut count = 0usize;
+
+        match direction {
+            Direction::Outgoing => {
+                if let Some(csr) = self.forward_csr.get(&label) {
+                    count += csr
+                        .edge_ids_of(vid)
+                        .iter()
+                        .filter(|&&eid| self.edge_exists(EdgeId(eid)))
+                        .count();
+                }
+                if let Some(delta) = self.delta_forward.get(&label) {
+                    count += delta
+                        .iter()
+                        .filter(|&&(src, _, eid)| src == vid && self.edge_exists(EdgeId(eid)))
+                        .count();
+                }
+            }
+            Direction::Incoming => {
+                if let Some(csr) = self.backward_csr.get(&label) {
+                    count += csr
+                        .edge_ids_of(vid)
+                        .iter()
+                        .filter(|&&eid| self.edge_exists(EdgeId(eid)))
+                        .count();
+                }
+                if let Some(delta) = self.delta_backward.get(&label) {
+                    count += delta
+                        .iter()
+                        .filter(|&&(src, _, eid)| src == vid && self.edge_exists(EdgeId(eid)))
+                        .count();
+                }
+            }
+            Direction::Both => {
+                count += self.degree(vertex, label, Direction::Outgoing);
+                count += self.degree(vertex, label, Direction::Incoming);
+                if let Some(incident) = self.incident_by_vertex.get(vertex.0 as usize) {
+                    count -= incident
+                        .iter()
+                        .filter(|&&eid| {
+                            self.edge_meta.get(&eid).is_some_and(|meta| {
+                                !meta.deleted
+                                    && meta.label == label
+                                    && meta.source == vertex
+                                    && meta.target == vertex
+                            })
+                        })
+                        .count();
+                }
+            }
+        }
+
+        count
+    }
+
     pub fn incident_degree(&self, vertex: VertexId, direction: Direction) -> usize {
-        self.neighbors_with_edges_any_label(vertex, direction).len()
+        let Some(incident) = self.incident_by_vertex.get(vertex.0 as usize) else {
+            return 0;
+        };
+        incident
+            .iter()
+            .filter(|&&eid| {
+                let Some(meta) = self.edge_meta.get(&eid) else {
+                    return false;
+                };
+                if meta.deleted {
+                    return false;
+                }
+                match direction {
+                    Direction::Outgoing => meta.source == vertex,
+                    Direction::Incoming => meta.target == vertex,
+                    Direction::Both => meta.source == vertex || meta.target == vertex,
+                }
+            })
+            .count()
+    }
+
+    pub fn estimated_heap_bytes(&self) -> usize {
+        let builder_entry = size_of::<(LabelId, CsrBuilder)>();
+        let csr_entry = size_of::<(LabelId, CsrMatrix)>();
+        let delta_entry = size_of::<(LabelId, Vec<(u64, u64, u64)>)>();
+
+        self.forward.capacity() * builder_entry
+            + self
+                .forward
+                .values()
+                .map(CsrBuilder::estimated_heap_bytes)
+                .sum::<usize>()
+            + self.backward.capacity() * builder_entry
+            + self
+                .backward
+                .values()
+                .map(CsrBuilder::estimated_heap_bytes)
+                .sum::<usize>()
+            + self.forward_csr.capacity() * csr_entry
+            + self
+                .forward_csr
+                .values()
+                .map(CsrMatrix::estimated_heap_bytes)
+                .sum::<usize>()
+            + self.backward_csr.capacity() * csr_entry
+            + self
+                .backward_csr
+                .values()
+                .map(CsrMatrix::estimated_heap_bytes)
+                .sum::<usize>()
+            + self.delta_forward.capacity() * delta_entry
+            + self
+                .delta_forward
+                .values()
+                .map(|edges| edges.capacity() * size_of::<(u64, u64, u64)>())
+                .sum::<usize>()
+            + self.delta_backward.capacity() * delta_entry
+            + self
+                .delta_backward
+                .values()
+                .map(|edges| edges.capacity() * size_of::<(u64, u64, u64)>())
+                .sum::<usize>()
+            + self.edge_meta.capacity() * size_of::<(u64, EdgeMeta)>()
+            + self.incident_by_vertex.capacity() * size_of::<Vec<u64>>()
+            + self
+                .incident_by_vertex
+                .iter()
+                .map(|edges| edges.capacity() * size_of::<u64>())
+                .sum::<usize>()
     }
 
     /// Get the forward CSR matrix for a specific edge label.
@@ -709,6 +857,36 @@ mod tests {
 
         let with_edges = store.neighbors_with_edges(VertexId(0), label, Direction::Outgoing);
         assert!(with_edges.contains(&(VertexId(1), e0)));
+    }
+
+    #[test]
+    fn adjacency_store_degree_counts_without_materializing_neighbors() {
+        let mut store = AdjacencyStore::new(4);
+        let rel = LabelId(0);
+        let other = LabelId(1);
+
+        let ab = store.add_edge(VertexId(0), VertexId(1), rel);
+        store.add_edge(VertexId(1), VertexId(0), rel);
+        store.add_edge(VertexId(0), VertexId(0), rel);
+        store.add_edge(VertexId(0), VertexId(2), other);
+        store.build();
+
+        assert_eq!(store.degree(VertexId(0), rel, Direction::Outgoing), 2);
+        assert_eq!(store.degree(VertexId(0), rel, Direction::Incoming), 2);
+        assert_eq!(store.degree(VertexId(0), rel, Direction::Both), 3);
+        assert_eq!(store.degree(VertexId(0), other, Direction::Both), 1);
+        assert_eq!(store.incident_degree(VertexId(0), Direction::Both), 4);
+
+        store.remove_edge(ab).unwrap();
+        assert_eq!(store.degree(VertexId(0), rel, Direction::Outgoing), 1);
+        assert_eq!(store.degree(VertexId(1), rel, Direction::Incoming), 0);
+
+        let delta = store.add_edge(VertexId(2), VertexId(0), rel);
+        assert_eq!(store.degree(VertexId(0), rel, Direction::Incoming), 3);
+        assert_eq!(store.incident_degree(VertexId(0), Direction::Both), 4);
+
+        store.remove_edge(delta).unwrap();
+        assert_eq!(store.degree(VertexId(0), rel, Direction::Incoming), 2);
     }
 
     #[test]

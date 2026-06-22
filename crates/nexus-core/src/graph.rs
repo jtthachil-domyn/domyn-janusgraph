@@ -4,6 +4,7 @@ use crate::csr::{AdjacencyError, AdjacencyStore};
 use crate::properties::{PropertyError, PropertyStore, PropertyType};
 use crate::types::*;
 use std::collections::HashMap;
+use std::mem::size_of;
 
 /// Label dictionary: maps label names to IDs and back.
 #[derive(Clone)]
@@ -45,6 +46,13 @@ impl LabelDictionary {
     pub fn is_empty(&self) -> bool {
         self.id_to_name.is_empty()
     }
+
+    pub fn estimated_heap_bytes(&self) -> usize {
+        self.name_to_id.capacity() * size_of::<(String, LabelId)>()
+            + self.name_to_id.keys().map(String::capacity).sum::<usize>()
+            + self.id_to_name.capacity() * size_of::<String>()
+            + self.id_to_name.iter().map(String::capacity).sum::<usize>()
+    }
 }
 
 impl Default for LabelDictionary {
@@ -69,6 +77,32 @@ pub struct Graph {
     edge_properties: PropertyStore,
     num_vertices: usize,
     built: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GraphCompactionStats {
+    pub deleted_vertices_cleared: usize,
+    pub deleted_edges_cleared: usize,
+    pub tombstoned_edge_meta_removed: usize,
+    pub delta_edges_compacted: usize,
+    pub live_edges_after: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GraphCompactionPressure {
+    pub deleted_vertices: usize,
+    pub tombstoned_edges: usize,
+    pub delta_edges: usize,
+}
+
+impl GraphCompactionPressure {
+    pub fn total(&self) -> usize {
+        self.deleted_vertices + self.tombstoned_edges + self.delta_edges
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.total() == 0
+    }
 }
 
 impl Graph {
@@ -168,11 +202,13 @@ impl Graph {
             });
         }
         if self.vertex_properties.property_id(key).is_none() {
-            let property_type = PropertyType::from_value(&value).ok_or_else(|| {
-                GraphError::Property(PropertyError::UnknownProperty(key.to_string()))
-            })?;
+            if matches!(value, Value::Null) {
+                return Err(GraphError::Property(PropertyError::UnknownProperty(
+                    key.to_string(),
+                )));
+            }
             self.vertex_properties
-                .register_property(key, property_type, false, false);
+                .register_property(key, PropertyType::Any, false, false);
         }
         self.vertex_properties
             .try_set_by_name(vertex.0 as usize, key, value)?;
@@ -280,11 +316,13 @@ impl Graph {
             });
         }
         if self.edge_properties.property_id(key).is_none() {
-            let property_type = PropertyType::from_value(&value).ok_or_else(|| {
-                GraphError::Property(PropertyError::UnknownProperty(key.to_string()))
-            })?;
+            if matches!(value, Value::Null) {
+                return Err(GraphError::Property(PropertyError::UnknownProperty(
+                    key.to_string(),
+                )));
+            }
             self.edge_properties
-                .register_property(key, property_type, false, false);
+                .register_property(key, PropertyType::Any, false, false);
         }
         self.edge_properties
             .try_set_by_name(edge.0 as usize, key, value)?;
@@ -316,6 +354,73 @@ impl Graph {
         Ok(())
     }
 
+    pub fn compaction_pressure(&self) -> GraphCompactionPressure {
+        GraphCompactionPressure {
+            deleted_vertices: self
+                .vertex_label_assignments
+                .iter()
+                .enumerate()
+                .filter(|(row, label)| {
+                    label.0 == u16::MAX && self.vertex_properties.row_has_values(*row)
+                })
+                .count(),
+            tombstoned_edges: self.adjacency.tombstoned_edge_count(),
+            delta_edges: self.adjacency.delta_edge_count(),
+        }
+    }
+
+    /// Compact tombstones without remapping stable vertex or edge IDs.
+    ///
+    /// Vertex and edge IDs are row IDs and are referenced by WAL entries, query
+    /// results, and external callers. This compaction therefore clears deleted
+    /// property payloads and rebuilds adjacency/CSR metadata, but intentionally
+    /// keeps row slots allocated.
+    pub fn compact_tombstones(&mut self) -> Result<GraphCompactionStats, GraphError> {
+        if !self.built {
+            return Err(GraphError::NotBuilt);
+        }
+
+        let pressure = self.compaction_pressure();
+        let mut stats = GraphCompactionStats {
+            tombstoned_edge_meta_removed: pressure.tombstoned_edges,
+            delta_edges_compacted: pressure.delta_edges,
+            ..GraphCompactionStats::default()
+        };
+
+        for row in 0..self.vertex_label_assignments.len() {
+            if self.vertex_label_assignments[row].0 == u16::MAX {
+                self.vertex_properties.clear_row(row)?;
+                stats.deleted_vertices_cleared += 1;
+            }
+        }
+
+        for row in 0..self.edge_properties.count() {
+            if !self.adjacency.edge_exists(EdgeId(row as u64)) {
+                self.edge_properties.clear_row(row)?;
+                stats.deleted_edges_cleared += 1;
+            }
+        }
+
+        self.adjacency.rebuild();
+        stats.live_edges_after = self.adjacency.live_edge_count();
+        Ok(stats)
+    }
+
+    /// Approximate heap memory owned by the graph core: label dictionaries,
+    /// vertex-label assignments, adjacency structures, and property stores.
+    ///
+    /// This intentionally does not try to account for allocator fragmentation,
+    /// temporary query rows, index memory, or runtime/server overhead. It is an
+    /// operational trend metric, not an exact process-memory accounting tool.
+    pub fn estimated_heap_bytes(&self) -> usize {
+        self.vertex_labels.estimated_heap_bytes()
+            + self.edge_labels.estimated_heap_bytes()
+            + self.vertex_label_assignments.capacity() * size_of::<LabelId>()
+            + self.adjacency.estimated_heap_bytes()
+            + self.vertex_properties.estimated_heap_bytes()
+            + self.edge_properties.estimated_heap_bytes()
+    }
+
     // --- Read operations (available after build) ---
 
     pub fn num_vertices(&self) -> usize {
@@ -335,6 +440,20 @@ impl Graph {
         self.vertex_label_assignments
             .get(vertex.0 as usize)
             .and_then(|&lid| self.vertex_labels.name(lid))
+    }
+
+    /// Replace the label of an existing vertex with a new colon-joined label
+    /// string. Used by `SET n:Label` / `REMOVE n:Label` after the executor
+    /// computes the new label set.
+    pub fn try_set_vertex_label(
+        &mut self,
+        vertex: VertexId,
+        label: &str,
+    ) -> Result<(), GraphError> {
+        self.validate_vertex(vertex)?;
+        let label_id = self.vertex_labels.get_or_create(label);
+        self.vertex_label_assignments[vertex.0 as usize] = label_id;
+        Ok(())
     }
 
     /// Get a vertex property.
@@ -413,8 +532,21 @@ impl Graph {
         self.adjacency.incident_edges(vertex)
     }
 
+    pub fn degree(&self, vertex: VertexId, label: &str, direction: Direction) -> usize {
+        if !self.vertex_exists(vertex) {
+            return 0;
+        }
+        self.edge_labels
+            .get(label)
+            .map(|label_id| self.adjacency.degree(vertex, label_id, direction))
+            .unwrap_or(0)
+    }
+
     pub fn incident_degree(&self, vertex: VertexId, direction: Direction) -> usize {
-        self.neighbors_with_edges_any_label(vertex, direction).len()
+        if !self.vertex_exists(vertex) {
+            return 0;
+        }
+        self.adjacency.incident_degree(vertex, direction)
     }
 
     pub fn edge_between(&self, source: VertexId, target: VertexId, label: &str) -> Option<EdgeId> {
@@ -481,9 +613,6 @@ impl Graph {
 
     pub fn edge_label(&self, edge: EdgeId) -> Option<&str> {
         let meta = self.adjacency.edge_meta(edge)?;
-        if meta.deleted {
-            return None;
-        }
         self.edge_labels.name(meta.label)
     }
 
@@ -683,6 +812,30 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_properties_default_to_any_without_weakening_explicit_schema() {
+        let mut g = Graph::new(4, 2);
+        let a = g.add_vertex("Entity");
+        let b = g.add_vertex("Entity");
+
+        g.try_set_vertex_property(a, "dynamic", Value::Int64(42))
+            .unwrap();
+        g.try_set_vertex_property(b, "dynamic", Value::String("forty-two".into()))
+            .unwrap();
+
+        assert_eq!(g.get_vertex_property(a, "dynamic"), Value::Int64(42));
+        assert_eq!(
+            g.get_vertex_property(b, "dynamic"),
+            Value::String("forty-two".into())
+        );
+
+        g.register_vertex_property("strict", PropertyType::Int64, false, false);
+        assert!(
+            g.try_set_vertex_property(a, "strict", Value::String("nope".into()))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn edge_records_include_post_build_delta_edges() {
         let mut g = Graph::new(4, 4);
         let a = g.add_vertex("Entity");
@@ -740,6 +893,35 @@ mod tests {
     }
 
     #[test]
+    fn graph_degree_counts_typed_and_any_label_edges() {
+        let mut g = Graph::new(4, 4);
+        let a = g.add_vertex("Entity");
+        let b = g.add_vertex("Entity");
+        let c = g.add_vertex("Entity");
+        let ab = g.add_edge(a, b, "KNOWS");
+        g.add_edge(b, a, "KNOWS");
+        g.add_edge(a, a, "KNOWS");
+        g.add_edge(a, c, "MENTIONS");
+        g.build();
+
+        assert_eq!(g.degree(a, "KNOWS", Direction::Outgoing), 2);
+        assert_eq!(g.degree(a, "KNOWS", Direction::Incoming), 2);
+        assert_eq!(g.degree(a, "KNOWS", Direction::Both), 3);
+        assert_eq!(g.incident_degree(a, Direction::Both), 4);
+
+        let delta = g.add_edge(c, a, "KNOWS");
+        assert_eq!(g.degree(a, "KNOWS", Direction::Incoming), 3);
+        assert_eq!(g.incident_degree(a, Direction::Both), 5);
+
+        g.try_remove_edge(ab).unwrap();
+        g.try_remove_edge(delta).unwrap();
+        assert_eq!(g.degree(a, "KNOWS", Direction::Outgoing), 1);
+        assert_eq!(g.degree(a, "KNOWS", Direction::Incoming), 2);
+        assert_eq!(g.incident_degree(a, Direction::Both), 3);
+        assert_eq!(g.degree(a, "UNKNOWN", Direction::Both), 0);
+    }
+
+    #[test]
     fn vertex_delete_tombstones_incident_edges() {
         let mut g = Graph::new(4, 4);
         let a = g.add_vertex("Entity");
@@ -756,5 +938,78 @@ mod tests {
         assert!(!g.edge_exists(bc));
         assert!(g.neighbors(a, "KNOWS", Direction::Outgoing).is_empty());
         assert!(g.edge_records().is_empty());
+    }
+
+    #[test]
+    fn compact_tombstones_clears_deleted_payloads_and_rebuilds_adjacency() {
+        let mut g = Graph::new(4, 4);
+        g.register_vertex_property("name", PropertyType::String, true, false);
+        g.register_edge_property("weight", PropertyType::Float64, false, false);
+        let a = g.add_vertex("Entity");
+        let b = g.add_vertex("Entity");
+        g.set_vertex_property(a, "name", Value::String("A".into()));
+        g.set_vertex_property(b, "name", Value::String("B".into()));
+        let ab = g.add_edge(a, b, "KNOWS");
+        g.set_edge_property(ab, "weight", Value::Float64(1.0));
+        g.build();
+
+        let c = g.add_vertex("Entity");
+        g.set_vertex_property(c, "name", Value::String("C".into()));
+        let bc = g.add_edge(b, c, "KNOWS");
+        g.set_edge_property(bc, "weight", Value::Float64(2.0));
+        g.try_remove_vertex(b).unwrap();
+
+        assert!(g.edge_meta(ab).is_some());
+        assert!(g.edge_meta(bc).is_some());
+        assert_eq!(
+            g.compaction_pressure(),
+            GraphCompactionPressure {
+                deleted_vertices: 1,
+                tombstoned_edges: 2,
+                delta_edges: 1,
+            }
+        );
+
+        let stats = g.compact_tombstones().unwrap();
+
+        assert_eq!(stats.deleted_vertices_cleared, 1);
+        assert_eq!(stats.deleted_edges_cleared, 2);
+        assert_eq!(stats.tombstoned_edge_meta_removed, 2);
+        assert_eq!(stats.delta_edges_compacted, 1);
+        assert_eq!(stats.live_edges_after, 0);
+        assert!(g.get_vertex_property(b, "name").is_null());
+        assert!(g.get_edge_property(ab, "weight").is_null());
+        assert!(g.get_edge_property(bc, "weight").is_null());
+        assert!(g.edge_meta(ab).is_none());
+        assert!(g.edge_meta(bc).is_none());
+        assert!(g.neighbors(a, "KNOWS", Direction::Outgoing).is_empty());
+        assert!(g.neighbors(c, "KNOWS", Direction::Incoming).is_empty());
+        assert!(g.compaction_pressure().is_empty());
+    }
+
+    #[test]
+    fn graph_estimated_heap_bytes_tracks_core_owned_memory() {
+        let mut g = Graph::new(0, 0);
+        let empty_estimate = g.estimated_heap_bytes();
+
+        g.register_vertex_property("name", PropertyType::String, true, false);
+        g.register_vertex_property("payload", PropertyType::Any, false, false);
+        let a = g.add_vertex("Entity");
+        let b = g.add_vertex("Entity");
+        g.set_vertex_property(a, "name", Value::String("Alpha".repeat(8)));
+        g.set_vertex_property(
+            a,
+            "payload",
+            Value::List(vec![
+                Value::String("nested".repeat(4)),
+                Value::Map(vec![("key".into(), Value::String("value".repeat(4)))]),
+            ]),
+        );
+        g.add_edge(a, b, "RELATES_TO");
+        g.build();
+
+        let populated_estimate = g.estimated_heap_bytes();
+        assert!(populated_estimate > empty_estimate);
+        assert!(populated_estimate > 0);
     }
 }

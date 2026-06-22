@@ -8,6 +8,7 @@
 
 use crate::types::{PropertyKeyId, Value};
 use std::collections::HashMap;
+use std::mem::size_of;
 
 /// A single typed column storing values for one property across all vertices/edges.
 #[derive(Debug, Clone)]
@@ -17,6 +18,7 @@ pub enum Column {
     Float64(Vec<Option<f64>>),
     String(Vec<Option<String>>),
     Bytes(Vec<Option<Vec<u8>>>),
+    Any(Vec<Option<Value>>),
 }
 
 impl Column {
@@ -27,6 +29,7 @@ impl Column {
             Column::Float64(_) => PropertyType::Float64,
             Column::String(_) => PropertyType::String,
             Column::Bytes(_) => PropertyType::Bytes,
+            Column::Any(_) => PropertyType::Any,
         }
     }
 
@@ -37,6 +40,7 @@ impl Column {
             Column::Float64(v) => v.len(),
             Column::String(v) => v.len(),
             Column::Bytes(v) => v.len(),
+            Column::Any(v) => v.len(),
         }
     }
 
@@ -71,11 +75,20 @@ impl Column {
                 .and_then(|o| o.as_ref())
                 .map(|b| Value::Bytes(b.clone()))
                 .unwrap_or(Value::Null),
+            Column::Any(v) => v
+                .get(idx)
+                .and_then(|o| o.as_ref())
+                .cloned()
+                .unwrap_or(Value::Null),
         }
     }
 
     pub fn set(&mut self, idx: usize, value: Value) {
         let _ = self.try_set(idx, value);
+    }
+
+    pub fn clear(&mut self, idx: usize) -> Result<(), PropertyError> {
+        self.try_set(idx, Value::Null)
     }
 
     pub fn try_set(&mut self, idx: usize, value: Value) -> Result<(), PropertyError> {
@@ -93,6 +106,7 @@ impl Column {
                 Column::Float64(v) => v[idx] = None,
                 Column::String(v) => v[idx] = None,
                 Column::Bytes(v) => v[idx] = None,
+                Column::Any(v) => v[idx] = None,
             }
             return Ok(());
         }
@@ -113,6 +127,9 @@ impl Column {
             (Column::Bytes(v), Value::Bytes(b)) => {
                 v[idx] = Some(b);
             }
+            (Column::Any(v), value) => {
+                v[idx] = Some(value);
+            }
             (col, value) => {
                 return Err(PropertyError::TypeMismatch {
                     expected: col.property_type(),
@@ -132,6 +149,38 @@ impl Column {
             Column::Float64(_) => Column::Float64(vec![None; n]),
             Column::String(_) => Column::String(vec![None; n]),
             Column::Bytes(_) => Column::Bytes(vec![None; n]),
+            Column::Any(_) => Column::Any(vec![None; n]),
+        }
+    }
+
+    /// Approximate heap memory owned by this column, including vector capacity
+    /// and nested payloads. This is telemetry-oriented, not allocator-exact.
+    pub fn estimated_heap_bytes(&self) -> usize {
+        match self {
+            Column::Bool(v) => v.capacity() * size_of::<Option<bool>>(),
+            Column::Int64(v) => v.capacity() * size_of::<Option<i64>>(),
+            Column::Float64(v) => v.capacity() * size_of::<Option<f64>>(),
+            Column::String(v) => {
+                v.capacity() * size_of::<Option<String>>()
+                    + v.iter()
+                        .filter_map(Option::as_ref)
+                        .map(String::capacity)
+                        .sum::<usize>()
+            }
+            Column::Bytes(v) => {
+                v.capacity() * size_of::<Option<Vec<u8>>>()
+                    + v.iter()
+                        .filter_map(Option::as_ref)
+                        .map(Vec::capacity)
+                        .sum::<usize>()
+            }
+            Column::Any(v) => {
+                v.capacity() * size_of::<Option<Value>>()
+                    + v.iter()
+                        .filter_map(Option::as_ref)
+                        .map(Value::estimated_heap_bytes)
+                        .sum::<usize>()
+            }
         }
     }
 }
@@ -144,6 +193,7 @@ pub enum PropertyType {
     Float64,
     String,
     Bytes,
+    Any,
 }
 
 impl std::fmt::Display for PropertyType {
@@ -154,6 +204,7 @@ impl std::fmt::Display for PropertyType {
             PropertyType::Float64 => write!(f, "float64"),
             PropertyType::String => write!(f, "string"),
             PropertyType::Bytes => write!(f, "bytes"),
+            PropertyType::Any => write!(f, "any"),
         }
     }
 }
@@ -166,7 +217,8 @@ impl PropertyType {
             Value::Float64(_) => Some(PropertyType::Float64),
             Value::String(_) => Some(PropertyType::String),
             Value::Bytes(_) => Some(PropertyType::Bytes),
-            Value::Null | Value::List(_) | Value::Map(_) => None,
+            Value::List(_) | Value::Map(_) => Some(PropertyType::Any),
+            Value::Null => None,
         }
     }
 
@@ -177,6 +229,7 @@ impl PropertyType {
             PropertyType::Float64 => Column::Float64(vec![None; size]),
             PropertyType::String => Column::String(vec![None; size]),
             PropertyType::Bytes => Column::Bytes(vec![None; size]),
+            PropertyType::Any => Column::Any(vec![None; size]),
         }
     }
 }
@@ -330,6 +383,12 @@ impl PropertyStore {
             .collect()
     }
 
+    pub fn row_has_values(&self, row: usize) -> bool {
+        self.key_defs
+            .keys()
+            .any(|key| !self.get(row, *key).is_null())
+    }
+
     pub fn property_id(&self, name: &str) -> Option<PropertyKeyId> {
         self.name_to_id.get(name).copied()
     }
@@ -338,8 +397,48 @@ impl PropertyStore {
         self.count
     }
 
+    /// Clear all property values for a row without removing the row itself.
+    ///
+    /// Stable graph IDs are row IDs, so compaction must not physically remove
+    /// rows. Clearing releases owned payloads for tombstoned vertices/edges
+    /// while preserving ID determinism for WAL replay and external references.
+    pub fn clear_row(&mut self, row: usize) -> Result<(), PropertyError> {
+        if row >= self.count {
+            return Err(PropertyError::RowOutOfBounds {
+                row,
+                rows: self.count,
+            });
+        }
+        for column in self.columns.values_mut() {
+            column.clear(row)?;
+        }
+        Ok(())
+    }
+
     pub fn key_defs(&self) -> impl Iterator<Item = &PropertyKeyDef> {
         self.key_defs.values()
+    }
+
+    /// Approximate heap memory owned by the property store. Includes column
+    /// buffers, schema strings, and rough hash table bucket footprints.
+    pub fn estimated_heap_bytes(&self) -> usize {
+        let columns_bytes = self.columns.capacity() * size_of::<(PropertyKeyId, Column)>()
+            + self
+                .columns
+                .values()
+                .map(Column::estimated_heap_bytes)
+                .sum::<usize>();
+        let key_defs_bytes = self.key_defs.capacity()
+            * size_of::<(PropertyKeyId, PropertyKeyDef)>()
+            + self
+                .key_defs
+                .values()
+                .map(|def| def.name.capacity())
+                .sum::<usize>();
+        let name_to_id_bytes = self.name_to_id.capacity() * size_of::<(String, PropertyKeyId)>()
+            + self.name_to_id.keys().map(String::capacity).sum::<usize>();
+
+        columns_bytes + key_defs_bytes + name_to_id_bytes
     }
 
     fn grow(&mut self) {
@@ -355,6 +454,7 @@ impl PropertyStore {
                 Column::Float64(v) => v.resize(new_cap, None),
                 Column::String(v) => v.resize(new_cap, None),
                 Column::Bytes(v) => v.resize(new_cap, None),
+                Column::Any(v) => v.resize(new_cap, None),
             }
         }
         self.capacity = new_cap;
@@ -446,5 +546,36 @@ mod tests {
             }
         ));
         assert!(store.get_by_name(row, "age").is_null());
+    }
+
+    #[test]
+    fn property_store_any_preserves_list_values() {
+        let mut store = PropertyStore::new(1);
+        store.register_property("numbers", PropertyType::Any, false, false);
+        let row = store.allocate_row();
+        let value = Value::List(vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)]);
+
+        store
+            .try_set_by_name(row, "numbers", value.clone())
+            .unwrap();
+
+        assert_eq!(store.get_by_name(row, "numbers"), value);
+    }
+
+    #[test]
+    fn property_store_clear_row_removes_payloads_without_reusing_rows() {
+        let mut store = PropertyStore::new(2);
+        store.register_property("name", PropertyType::String, true, false);
+        store.register_property("age", PropertyType::Int64, false, false);
+        let row = store.allocate_row();
+        store.set_by_name(row, "name", Value::String("Alice".into()));
+        store.set_by_name(row, "age", Value::Int64(30));
+
+        store.clear_row(row).unwrap();
+
+        assert_eq!(store.count(), 1);
+        assert!(store.get_by_name(row, "name").is_null());
+        assert!(store.get_by_name(row, "age").is_null());
+        assert!(!store.row_has_values(row));
     }
 }

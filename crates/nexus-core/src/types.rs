@@ -98,6 +98,27 @@ impl Value {
     pub fn is_null(&self) -> bool {
         matches!(self, Value::Null)
     }
+
+    /// Approximate heap memory owned by this value, excluding the enum slot
+    /// itself. Used for operational telemetry, not exact allocator accounting.
+    pub fn estimated_heap_bytes(&self) -> usize {
+        match self {
+            Value::Null | Value::Bool(_) | Value::Int64(_) | Value::Float64(_) => 0,
+            Value::String(s) => s.capacity(),
+            Value::Bytes(bytes) => bytes.capacity(),
+            Value::List(items) => {
+                items.capacity() * std::mem::size_of::<Value>()
+                    + items.iter().map(Value::estimated_heap_bytes).sum::<usize>()
+            }
+            Value::Map(entries) => {
+                entries.capacity() * std::mem::size_of::<(String, Value)>()
+                    + entries
+                        .iter()
+                        .map(|(key, value)| key.capacity() + value.estimated_heap_bytes())
+                        .sum::<usize>()
+            }
+        }
+    }
 }
 
 impl fmt::Display for Value {
