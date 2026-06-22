@@ -1,2 +1,5 @@
+[alias]
+xtask = "run -p xtask --"
+
 [target.aarch64-apple-darwin]
 rustflags = ["-C", "symbol-mangling-version=v0"]

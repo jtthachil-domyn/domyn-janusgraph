@@ -1,0 +1,318 @@
+#cloud-config
+package_update: true
+packages:
+  - ca-certificates
+  - curl
+  - docker.io
+  - openssl
+  - python3
+
+write_files:
+  - path: /etc/domyn-nexus/openssl.cnf
+    permissions: "0644"
+    content: |
+      [req]
+      distinguished_name = req_distinguished_name
+      x509_extensions = v3_req
+      prompt = no
+
+      [req_distinguished_name]
+      CN = localhost
+
+      [v3_req]
+      subjectAltName = @alt_names
+
+      [alt_names]
+      DNS.1 = localhost
+      IP.1 = 127.0.0.1
+  - path: /etc/domyn-nexus/config.template.json
+    permissions: "0600"
+    content: |
+      {
+        "production_mode": true,
+        "storage_path": "/var/lib/domyn-nexus",
+        "auth_principals": [
+          {
+            "name": "admin",
+            "token": "__ADMIN_TOKEN_RUNTIME__",
+            "role": "admin",
+            "tenants": ["*"]
+          },
+          {
+            "name": "writer",
+            "token": "__WRITER_TOKEN_RUNTIME__",
+            "role": "read_write",
+            "tenants": ["*"]
+          },
+          {
+            "name": "reader",
+            "token": "__READER_TOKEN_RUNTIME__",
+            "role": "read_only",
+            "tenants": ["*"]
+          }
+        ],
+        "http": {
+          "bind_addr": "0.0.0.0:8443",
+          "tls": {
+            "cert_path": "/etc/domyn-nexus/tls/http.crt",
+            "key_path": "/etc/domyn-nexus/tls/http.key",
+            "client_ca_path": null,
+            "require_client_auth": false
+          },
+          "query_timeout_secs": 30,
+          "max_body_bytes": 1048576,
+          "max_concurrent_queries": 64,
+          "max_query_rate_per_sec": 1000,
+          "max_query_rate_per_tenant_per_sec": 100,
+          "slow_query_ms": 250,
+          "wal_segment_bytes": 67108864,
+          "wal_retention_segments": 8,
+          "snapshot_retention": 4,
+          "compaction_threshold": 10000,
+          "query_memory_budget_bytes": 67108864,
+          "process_memory_budget_bytes": 0,
+          "default_query_limit": 10000,
+          "vector_index_mode": "Hnsw",
+          "backup_root": "/var/backups/domyn-nexus",
+          "audit_log_path": "/var/log/domyn-nexus/audit.jsonl"
+        },
+        "bolt": {
+          "enabled": true,
+          "bind_addr": "0.0.0.0:7687",
+          "max_connections": 256,
+          "query_timeout_secs": 30,
+          "default_query_limit": 10000,
+          "query_memory_budget_bytes": 67108864,
+          "tls": {
+            "cert_path": "/etc/domyn-nexus/tls/bolt.crt",
+            "key_path": "/etc/domyn-nexus/tls/bolt.key",
+            "client_ca_path": null,
+            "require_client_auth": false
+          }
+        }
+      }
+  - path: /usr/local/bin/domyn-nexus-fetch-secrets.sh
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      KEY_VAULT_NAME="__KEY_VAULT_NAME__"
+      MANAGED_IDENTITY_CLIENT_ID="__MANAGED_IDENTITY_CLIENT_ID__"
+      TEMPLATE="/etc/domyn-nexus/config.template.json"
+      CONFIG="/etc/domyn-nexus/config.json"
+
+      imds_token() {
+        local resource="$1"
+        local encoded
+        encoded="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$resource")"
+        local client_id
+        client_id="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$MANAGED_IDENTITY_CLIENT_ID")"
+        curl -fsS -H Metadata:true \
+          "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=${encoded}&client_id=${client_id}" \
+          | python3 -c 'import json, sys; print(json.load(sys.stdin)["access_token"])'
+      }
+
+      secret_value() {
+        local token="$1"
+        local name="$2"
+        curl -fsS -H "Authorization: Bearer ${token}" \
+          "https://${KEY_VAULT_NAME}.vault.azure.net/secrets/${name}?api-version=7.4" \
+          | python3 -c 'import json, sys; print(json.load(sys.stdin)["value"])'
+      }
+
+      vault_token="$(imds_token "https://vault.azure.net")"
+      admin_token="$(secret_value "$vault_token" nexus-admin-token)"
+      writer_token="$(secret_value "$vault_token" nexus-writer-token)"
+      reader_token="$(secret_value "$vault_token" nexus-reader-token)"
+
+      ADMIN_TOKEN="$admin_token" WRITER_TOKEN="$writer_token" READER_TOKEN="$reader_token" \
+      python3 - <<'PY'
+      import os
+      from pathlib import Path
+
+      template_path = Path("/etc/domyn-nexus/config.template.json")
+      config_path = Path("/etc/domyn-nexus/config.json")
+      text = template_path.read_text()
+      replacements = {
+          "__ADMIN_TOKEN_RUNTIME__": os.environ["ADMIN_TOKEN"],
+          "__WRITER_TOKEN_RUNTIME__": os.environ["WRITER_TOKEN"],
+          "__READER_TOKEN_RUNTIME__": os.environ["READER_TOKEN"],
+      }
+      for marker, value in replacements.items():
+          text = text.replace(marker, value.replace("\\", "\\\\").replace('"', '\\"'))
+      config_path.write_text(text)
+      config_path.chmod(0o600)
+      PY
+  - path: /usr/local/bin/domyn-nexus-install-tls.sh
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      KEY_VAULT_NAME="__KEY_VAULT_NAME__"
+      MANAGED_IDENTITY_CLIENT_ID="__MANAGED_IDENTITY_CLIENT_ID__"
+      TLS_DIR="/etc/domyn-nexus/tls"
+
+      imds_token() {
+        local resource="$1"
+        local encoded
+        encoded="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$resource")"
+        local client_id
+        client_id="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$MANAGED_IDENTITY_CLIENT_ID")"
+        curl -fsS -H Metadata:true \
+          "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=${encoded}&client_id=${client_id}" \
+          | python3 -c 'import json, sys; print(json.load(sys.stdin)["access_token"])'
+      }
+
+      secret_value_optional() {
+        local token="$1"
+        local name="$2"
+        local response
+        if response="$(curl -fsS -H "Authorization: Bearer ${token}" \
+          "https://${KEY_VAULT_NAME}.vault.azure.net/secrets/${name}?api-version=7.4" 2>/dev/null)"; then
+          printf '%s' "$response" | python3 -c 'import json, sys; print(json.load(sys.stdin)["value"])'
+        else
+          printf ''
+        fi
+      }
+
+      mkdir -p "$TLS_DIR"
+      vault_token="$(imds_token "https://vault.azure.net")"
+      cert_pem="$(secret_value_optional "$vault_token" nexus-tls-cert-pem)"
+      key_pem="$(secret_value_optional "$vault_token" nexus-tls-key-pem)"
+
+      if [ -n "$cert_pem" ] || [ -n "$key_pem" ]; then
+        if [ -z "$cert_pem" ] || [ -z "$key_pem" ]; then
+          echo "both nexus-tls-cert-pem and nexus-tls-key-pem must be present when using Key Vault TLS" >&2
+          exit 1
+        fi
+        printf '%s\n' "$cert_pem" > "$TLS_DIR/http.crt"
+        printf '%s\n' "$key_pem" > "$TLS_DIR/http.key"
+        openssl x509 -in "$TLS_DIR/http.crt" -noout >/dev/null
+        openssl pkey -in "$TLS_DIR/http.key" -noout >/dev/null
+      else
+        openssl req -x509 -newkey rsa:2048 -nodes \
+          -keyout "$TLS_DIR/http.key" \
+          -out "$TLS_DIR/http.crt" \
+          -days 30 \
+          -config /etc/domyn-nexus/openssl.cnf
+      fi
+
+      cp "$TLS_DIR/http.key" "$TLS_DIR/bolt.key"
+      cp "$TLS_DIR/http.crt" "$TLS_DIR/bolt.crt"
+      chmod 0644 "$TLS_DIR"/*.crt
+      chmod 0600 "$TLS_DIR"/*.key
+  - path: /usr/local/bin/domyn-nexus-backup-sync.sh
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      BACKUP_ROOT="${1:-/var/backups/domyn-nexus}"
+      MANAGED_IDENTITY_CLIENT_ID="__MANAGED_IDENTITY_CLIENT_ID__"
+      STORAGE_ACCOUNT="__BACKUP_STORAGE_ACCOUNT__"
+      CONTAINER="__BACKUP_CONTAINER__"
+
+      if [ ! -d "$BACKUP_ROOT" ]; then
+        exit 0
+      fi
+
+      imds_token() {
+        local resource="$1"
+        local encoded
+        encoded="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$resource")"
+        local client_id
+        client_id="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$MANAGED_IDENTITY_CLIENT_ID")"
+        curl -fsS -H Metadata:true \
+          "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=${encoded}&client_id=${client_id}" \
+          | python3 -c 'import json, sys; print(json.load(sys.stdin)["access_token"])'
+      }
+
+      url_encode_path() {
+        python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe="/"))' "$1"
+      }
+
+      storage_token="$(imds_token "https://storage.azure.com/")"
+
+      find "$BACKUP_ROOT" -type f -print0 | while IFS= read -r -d '' file; do
+        rel="${file#"$BACKUP_ROOT"/}"
+        blob_path="$(url_encode_path "$rel")"
+        date_header="$(TZ=GMT date '+%a, %d %b %Y %H:%M:%S GMT')"
+        url="https://${STORAGE_ACCOUNT}.blob.core.windows.net/${CONTAINER}/${blob_path}"
+        curl -fsS -X PUT \
+          -H "Authorization: Bearer ${storage_token}" \
+          -H "x-ms-version: 2023-11-03" \
+          -H "x-ms-date: ${date_header}" \
+          -H "x-ms-blob-type: BlockBlob" \
+          --upload-file "$file" \
+          "$url" >/dev/null
+      done
+  - path: /etc/systemd/system/domyn-nexus.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Domyn Nexus single-node demo
+      Requires=docker.service
+      After=docker.service network-online.target
+
+      [Service]
+      Restart=always
+      RestartSec=5
+      ExecStartPre=/usr/local/bin/domyn-nexus-install-tls.sh
+      ExecStartPre=/usr/local/bin/domyn-nexus-fetch-secrets.sh
+      ExecStartPre=-/usr/bin/docker rm -f domyn-nexus
+      ExecStart=/usr/bin/docker run --name domyn-nexus \
+        -p 8443:8443 \
+        -p 7687:7687 \
+        -v /etc/domyn-nexus/config.json:/etc/domyn-nexus/config.json:ro \
+        -v /etc/domyn-nexus/tls:/etc/domyn-nexus/tls:ro \
+        -v /var/lib/domyn-nexus:/var/lib/domyn-nexus \
+        -v /var/log/domyn-nexus:/var/log/domyn-nexus \
+        -v /var/backups/domyn-nexus:/var/backups/domyn-nexus \
+        __NEXUS_IMAGE__
+      ExecStop=/usr/bin/docker stop domyn-nexus
+
+      [Install]
+      WantedBy=multi-user.target
+  - path: /etc/systemd/system/domyn-nexus-backup-sync.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Sync Domyn Nexus local backups to Azure Blob
+      After=network-online.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/domyn-nexus-backup-sync.sh /var/backups/domyn-nexus
+  - path: /etc/systemd/system/domyn-nexus-backup-sync.timer
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Hourly Domyn Nexus backup-to-Blob sync
+
+      [Timer]
+      OnBootSec=15min
+      OnUnitActiveSec=1h
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
+
+runcmd:
+  - systemctl enable --now docker
+  - mkdir -p /var/lib/domyn-nexus /var/log/domyn-nexus /var/backups/domyn-nexus /etc/domyn-nexus/tls
+  - |
+    if ! blkid /dev/disk/azure/scsi1/lun0; then
+      mkfs.ext4 -F /dev/disk/azure/scsi1/lun0
+    fi
+  - |
+    if ! grep -q "/var/lib/domyn-nexus" /etc/fstab; then
+      echo "/dev/disk/azure/scsi1/lun0 /var/lib/domyn-nexus ext4 defaults,nofail 0 2" >> /etc/fstab
+    fi
+  - mount -a
+  - /usr/local/bin/domyn-nexus-install-tls.sh
+  - /usr/local/bin/domyn-nexus-fetch-secrets.sh
+  - systemctl daemon-reload
+  - systemctl enable --now domyn-nexus
+  - systemctl enable --now domyn-nexus-backup-sync.timer

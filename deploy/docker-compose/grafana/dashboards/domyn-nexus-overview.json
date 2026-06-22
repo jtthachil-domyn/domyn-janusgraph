@@ -1,0 +1,263 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        }
+      },
+      "pluginVersion": "11.3.1",
+      "targets": [
+        {
+          "expr": "domyn_nexus_vertices",
+          "legendFormat": "vertices",
+          "refId": "A"
+        },
+        {
+          "expr": "domyn_nexus_edges",
+          "legendFormat": "edges",
+          "refId": "B"
+        }
+      ],
+      "title": "Graph Size",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        }
+      },
+      "pluginVersion": "11.3.1",
+      "targets": [
+        {
+          "expr": "domyn_nexus_active_queries",
+          "legendFormat": "active",
+          "refId": "A"
+        }
+      ],
+      "title": "Active Queries",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "id": 3,
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        }
+      },
+      "pluginVersion": "11.3.1",
+      "targets": [
+        {
+          "expr": "domyn_nexus_memory_estimate_bytes",
+          "legendFormat": "bytes",
+          "refId": "A"
+        }
+      ],
+      "title": "Memory Estimate",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "id": 4,
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        }
+      },
+      "pluginVersion": "11.3.1",
+      "targets": [
+        {
+          "expr": "domyn_nexus_storage_wal_bytes",
+          "legendFormat": "wal",
+          "refId": "A"
+        },
+        {
+          "expr": "domyn_nexus_storage_snapshot_bytes",
+          "legendFormat": "snapshots",
+          "refId": "B"
+        },
+        {
+          "expr": "domyn_nexus_storage_vector_snapshot_bytes",
+          "legendFormat": "vectors",
+          "refId": "C"
+        }
+      ],
+      "title": "Durable Bytes",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 6
+      },
+      "id": 5,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(domyn_nexus_queries_total[1m])",
+          "legendFormat": "queries/s",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(domyn_nexus_query_errors_total[1m])",
+          "legendFormat": "errors/s",
+          "refId": "B"
+        }
+      ],
+      "title": "Query Throughput",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      },
+      "id": 6,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(domyn_nexus_vector_searches_total[1m])",
+          "legendFormat": "vector searches/s",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(domyn_nexus_vector_search_exact_overlap_total[1m])",
+          "legendFormat": "exact overlap/s",
+          "refId": "B"
+        }
+      ],
+      "title": "Vector Search",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 40,
+  "tags": ["domyn-nexus"],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Domyn Nexus Overview",
+  "uid": "domyn-nexus-overview",
+  "version": 1,
+  "weekStart": ""
+}

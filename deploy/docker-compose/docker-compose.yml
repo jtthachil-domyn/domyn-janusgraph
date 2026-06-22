@@ -1,0 +1,83 @@
+services:
+  nexus:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: domyn-nexus:compose-demo
+    container_name: domyn-nexus-compose
+    ports:
+      - "18443:8443"
+      - "17687:7687"
+    volumes:
+      - ./config/nexus.json:/etc/domyn-nexus/config.json:ro
+      - ./certs:/etc/domyn-nexus/tls:ro
+      - nexus-data:/var/lib/domyn-nexus
+      - nexus-logs:/var/log/domyn-nexus
+      - nexus-backups:/var/backups/domyn-nexus
+    healthcheck:
+      test: ["CMD", "curl", "-fk", "https://127.0.0.1:8443/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: domyn-nexus-prometheus
+    depends_on:
+      nexus:
+        condition: service_healthy
+    ports:
+      - "19090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    container_name: domyn-nexus-grafana
+    depends_on:
+      - prometheus
+    ports:
+      - "13000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: domyn-nexus
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+
+  smoke:
+    image: curlimages/curl:8.11.1
+    depends_on:
+      nexus:
+        condition: service_healthy
+    command:
+      - sh
+      - -lc
+      - |
+        set -eu
+        curl -fk https://nexus:8443/health >/dev/null
+        curl -fk https://nexus:8443/ready >/dev/null
+        curl -fk https://nexus:8443/metrics | grep -q domyn_nexus
+        curl -fk \
+          -H 'Authorization: Bearer compose-admin-token' \
+          -H 'content-type: application/json' \
+          -d '{"query":"CREATE (n:ComposeSmoke {name: '\''compose-smoke'\''}) RETURN n.name"}' \
+          https://nexus:8443/cypher | grep -q compose-smoke
+        curl -fk \
+          -H 'Authorization: Bearer compose-admin-token' \
+          -H 'content-type: application/json' \
+          -d '{"path":"compose-smoke"}' \
+          https://nexus:8443/admin/backup | grep -q '"files"'
+        echo 'compose smoke passed'
+    profiles: ["smoke"]
+
+volumes:
+  nexus-data:
+  nexus-logs:
+  nexus-backups:
+  prometheus-data:
+  grafana-data:

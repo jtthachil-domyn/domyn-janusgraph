@@ -1,0 +1,198 @@
+groups:
+  - name: domyn-nexus.rules
+    interval: 30s
+    rules:
+      - alert: DomynNexusVectorRecallLow
+        expr: |
+          (
+            sum by (index) (increase(domyn_nexus_vector_search_exact_overlap_total{index!=""}[15m]))
+            /
+            clamp_min(sum by (index) (increase(domyn_nexus_vector_search_exact_candidates_total{index!=""}[15m])), 1)
+          ) < 0.95
+          and
+          sum by (index) (increase(domyn_nexus_vector_search_exact_candidates_total{index!=""}[15m])) >= 100
+        for: 15m
+        labels:
+          severity: warning
+          component: vector
+        annotations:
+          summary: "Vector recall overlap is below target for {{ $labels.index }}"
+          description: "Exact-oracle overlap for vector index {{ $labels.index }} stayed below 95% for 15 minutes over at least 100 exact candidates."
+
+      - alert: DomynNexusVectorRecallCritical
+        expr: |
+          (
+            sum by (index) (increase(domyn_nexus_vector_search_exact_overlap_total{index!=""}[10m]))
+            /
+            clamp_min(sum by (index) (increase(domyn_nexus_vector_search_exact_candidates_total{index!=""}[10m])), 1)
+          ) < 0.90
+          and
+          sum by (index) (increase(domyn_nexus_vector_search_exact_candidates_total{index!=""}[10m])) >= 100
+        for: 10m
+        labels:
+          severity: critical
+          component: vector
+        annotations:
+          summary: "Vector recall overlap is critically low for {{ $labels.index }}"
+          description: "Exact-oracle overlap for vector index {{ $labels.index }} stayed below 90% for 10 minutes."
+
+      - alert: DomynNexusQueryP95High
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(domyn_nexus_query_elapsed_ms_bucket[10m]))
+          ) > 500
+        for: 10m
+        labels:
+          severity: warning
+          component: query
+        annotations:
+          summary: "Cypher p95 latency is above 500 ms"
+          description: "The 10-minute p95 query latency estimate is above 500 ms."
+
+      - alert: DomynNexusQueryFailureRateHigh
+        expr: |
+          (
+            increase(domyn_nexus_queries_failed_total[10m])
+            /
+            clamp_min(increase(domyn_nexus_queries_total[10m]), 1)
+          ) > 0.05
+          and increase(domyn_nexus_queries_total[10m]) >= 20
+        for: 10m
+        labels:
+          severity: warning
+          component: query
+        annotations:
+          summary: "Cypher query failure rate is above 5%"
+          description: "More than 5% of queries have failed over the last 10 minutes."
+
+      - alert: DomynNexusQueryTimeouts
+        expr: increase(domyn_nexus_queries_timed_out_total[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: query
+        annotations:
+          summary: "Cypher queries are timing out"
+          description: "At least one query timed out in the last 10 minutes."
+
+      - alert: DomynNexusQueryRejected
+        expr: increase(domyn_nexus_queries_rejected_total[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: query
+        annotations:
+          summary: "Cypher queries are being rejected"
+          description: "The query admission controller rejected at least one query in the last 10 minutes."
+
+      - alert: DomynNexusRateLimited
+        expr: increase(domyn_nexus_queries_rate_limited_total[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: query
+        annotations:
+          summary: "Cypher clients are being rate limited"
+          description: "At least one query was rate limited in the last 10 minutes."
+
+      - alert: DomynNexusProcessMemoryAdmissionRejected
+        expr: increase(domyn_nexus_queries_memory_rejected_total[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: memory
+        annotations:
+          summary: "Cypher queries are rejected due to process memory pressure"
+          description: "At least one query was rejected because process RSS exceeded process_memory_budget_bytes."
+
+      - alert: DomynNexusProcessMemoryBudgetHigh
+        expr: |
+          (
+            domyn_nexus_process_resident_memory_bytes
+            /
+            domyn_nexus_config_process_memory_budget_bytes
+          ) > 0.90
+          and domyn_nexus_config_process_memory_budget_bytes > 0
+        for: 15m
+        labels:
+          severity: warning
+          component: memory
+        annotations:
+          summary: "Process RSS is above 90% of configured budget"
+          description: "Domyn Nexus process RSS has stayed above 90% of process_memory_budget_bytes for 15 minutes."
+
+      - alert: DomynNexusCompactionBacklogHigh
+        expr: |
+          (
+            domyn_nexus_compaction_deleted_vertices
+            + domyn_nexus_compaction_tombstoned_edges
+            + domyn_nexus_compaction_delta_edges
+          ) > 100000
+        for: 15m
+        labels:
+          severity: warning
+          component: storage
+        annotations:
+          summary: "Compaction backlog is high"
+          description: "Deleted vertices, tombstoned edges, and delta edges are above 100k for 15 minutes."
+
+      - alert: DomynNexusCompactionFailed
+        expr: increase(domyn_nexus_compaction_failed_total[15m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+          component: storage
+        annotations:
+          summary: "Compaction failed"
+          description: "At least one compaction attempt failed in the last 15 minutes."
+
+      - alert: DomynNexusBackupFailed
+        expr: increase(domyn_nexus_backup_failed_total[15m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+          component: storage
+        annotations:
+          summary: "Hot backup failed"
+          description: "At least one admin hot-backup attempt failed in the last 15 minutes."
+
+      - alert: DomynNexusAuditLogFailed
+        expr: increase(domyn_nexus_audit_failed_total[15m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+          component: security
+        annotations:
+          summary: "Audit log write failed"
+          description: "At least one security audit event failed to append in the last 15 minutes."
+
+      - alert: DomynNexusWalRecoverableBytesHigh
+        expr: domyn_nexus_storage_wal_recoverable_bytes > 1073741824
+        for: 30m
+        labels:
+          severity: warning
+          component: storage
+        annotations:
+          summary: "Recoverable WAL bytes exceed 1 GiB"
+          description: "The recoverable WAL footprint is above 1 GiB for 30 minutes. Consider checkpointing, compaction, or snapshot retention tuning."
+
+      - alert: DomynNexusStorageSnapshotMissing
+        expr: domyn_nexus_storage_snapshot_bytes == 0 and domyn_nexus_vertices > 0
+        for: 30m
+        labels:
+          severity: warning
+          component: storage
+        annotations:
+          summary: "Graph has data but no snapshot bytes"
+          description: "The engine reports vertices but no current snapshot bytes. WAL replay may be longer than expected after restart."
+
+      - alert: DomynNexusStorageSnapshotStale
+        expr: domyn_nexus_storage_snapshot_age_seconds > 3600 and domyn_nexus_vertices > 0
+        for: 30m
+        labels:
+          severity: warning
+          component: storage
+        annotations:
+          summary: "Graph snapshot is stale"
+          description: "The latest graph snapshot is older than one hour while the engine has data. Recovery may depend on a longer WAL replay window."

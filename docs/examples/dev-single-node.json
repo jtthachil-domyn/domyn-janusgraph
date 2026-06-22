@@ -1,0 +1,32 @@
+{
+  "production_mode": false,
+  "auth_token": "dev-token",
+  "storage_path": "/tmp/domyn-nexus-dev/data",
+  "http": {
+    "bind_addr": "127.0.0.1:18080",
+    "query_timeout_secs": 30,
+    "max_body_bytes": 1048576,
+    "max_concurrent_queries": 16,
+    "max_query_rate_per_sec": 0,
+    "max_query_rate_per_tenant_per_sec": 0,
+    "slow_query_ms": 250,
+    "wal_segment_bytes": 67108864,
+    "wal_retention_segments": 4,
+    "snapshot_retention": 2,
+    "compaction_threshold": 1000,
+    "query_memory_budget_bytes": 67108864,
+    "process_memory_budget_bytes": 0,
+    "default_query_limit": 10000,
+    "vector_index_mode": "Hnsw",
+    "backup_root": "/tmp/domyn-nexus-dev/backups",
+    "audit_log_path": "/tmp/domyn-nexus-dev/audit/audit.jsonl"
+  },
+  "bolt": {
+    "enabled": true,
+    "bind_addr": "127.0.0.1:17687",
+    "max_connections": 64,
+    "query_timeout_secs": 30,
+    "default_query_limit": 10000,
+    "query_memory_budget_bytes": 67108864
+  }
+}

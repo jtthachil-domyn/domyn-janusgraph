@@ -13,6 +13,7 @@ members = [
     "crates/nexus-distributed",
     "crates/nexus-python",
     "crates/nexus-bench",
+    "crates/xtask",
 ]
 
 [workspace.package]
@@ -82,6 +83,14 @@ crossbeam = "0.8"
 dashmap = "6"
 smallvec = "1"
 bitflags = "2"
+
+[profile.dev]
+# Keep local debug/test artifacts from ballooning into tens of GiB while
+# preserving file/line backtraces for normal development.
+debug = "line-tables-only"
+
+[profile.test]
+debug = "line-tables-only"
 
 [profile.release]
 lto = "thin"

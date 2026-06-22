@@ -1,0 +1,63 @@
+{
+  "production_mode": true,
+  "storage_path": "/var/lib/domyn-nexus",
+  "auth_principals": [
+    {
+      "name": "admin",
+      "token": "compose-admin-token",
+      "role": "admin",
+      "tenants": ["*"]
+    },
+    {
+      "name": "writer",
+      "token": "compose-writer-token",
+      "role": "read_write",
+      "tenants": ["*"]
+    },
+    {
+      "name": "reader",
+      "token": "compose-reader-token",
+      "role": "read_only",
+      "tenants": ["*"]
+    }
+  ],
+  "http": {
+    "bind_addr": "0.0.0.0:8443",
+    "tls": {
+      "cert_path": "/etc/domyn-nexus/tls/http.crt",
+      "key_path": "/etc/domyn-nexus/tls/http.key",
+      "client_ca_path": null,
+      "require_client_auth": false
+    },
+    "query_timeout_secs": 30,
+    "max_body_bytes": 1048576,
+    "max_concurrent_queries": 64,
+    "max_query_rate_per_sec": 1000,
+    "max_query_rate_per_tenant_per_sec": 100,
+    "slow_query_ms": 250,
+    "wal_segment_bytes": 67108864,
+    "wal_retention_segments": 8,
+    "snapshot_retention": 4,
+    "compaction_threshold": 10000,
+    "query_memory_budget_bytes": 67108864,
+    "process_memory_budget_bytes": 0,
+    "default_query_limit": 10000,
+    "vector_index_mode": "Hnsw",
+    "backup_root": "/var/backups/domyn-nexus",
+    "audit_log_path": "/var/log/domyn-nexus/audit.jsonl"
+  },
+  "bolt": {
+    "enabled": true,
+    "bind_addr": "0.0.0.0:7687",
+    "max_connections": 256,
+    "query_timeout_secs": 30,
+    "default_query_limit": 10000,
+    "query_memory_budget_bytes": 67108864,
+    "tls": {
+      "cert_path": "/etc/domyn-nexus/tls/bolt.crt",
+      "key_path": "/etc/domyn-nexus/tls/bolt.key",
+      "client_ca_path": null,
+      "require_client_auth": false
+    }
+  }
+}

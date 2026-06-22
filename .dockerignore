@@ -1,0 +1,11 @@
+target/
+.git/
+.DS_Store
+references/
+docs/DomynGraph v1.html
+**/*.profraw
+**/*.profdata
+**/*.pyc
+**/__pycache__/
+tmp/
+node_modules/

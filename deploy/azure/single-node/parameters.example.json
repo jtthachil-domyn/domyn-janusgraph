@@ -1,0 +1,39 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "namePrefix": {
+      "value": "domyn-nexus"
+    },
+    "nexusImage": {
+      "value": "ghcr.io/your-org/your-repo:v0.1.0"
+    },
+    "adminSshPublicKey": {
+      "value": "ssh-rsa REPLACE_WITH_PUBLIC_KEY"
+    },
+    "adminToken": {
+      "value": "replace-with-admin-token"
+    },
+    "writerToken": {
+      "value": "replace-with-writer-token"
+    },
+    "readerToken": {
+      "value": "replace-with-reader-token"
+    },
+    "tlsCertPem": {
+      "value": ""
+    },
+    "tlsKeyPem": {
+      "value": ""
+    },
+    "allowedSourceCidr": {
+      "value": "0.0.0.0/0"
+    },
+    "vmSize": {
+      "value": "Standard_D4s_v5"
+    },
+    "dataDiskSizeGb": {
+      "value": 128
+    }
+  }
+}
