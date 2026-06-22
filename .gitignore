@@ -1,10 +1,13 @@
 /target
 **/*.rs.bk
-Cargo.lock
 *.swp
 *.swo
 .DS_Store
+__pycache__/
+*.py[cod]
+.local/
 
 # Reference repos are gitignored -- they're local-only for reading
 /references/
 docs/tech-stack-slide-deck.md
+docs/DomynGraph v1.html

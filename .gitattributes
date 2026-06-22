@@ -1,0 +1,8 @@
+# Keep GitHub Linguist focused on Domyn Nexus itself.
+# The reference repos are local research inputs, not Nexus source.
+references/** linguist-vendored
+
+# Generated/exported presentation artifacts should not affect language stats.
+docs/*.html linguist-generated
+docs/ops/grafana-dashboard.json linguist-generated
+deploy/docker-compose/grafana/dashboards/*.json linguist-generated
