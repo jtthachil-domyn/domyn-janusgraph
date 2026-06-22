@@ -359,7 +359,10 @@ fn map_pattern(pattern: kyu::Pattern) -> NexusParserResult<domyn::Pattern> {
         .map(map_pattern_element)
         .collect::<NexusParserResult<Vec<_>>>()?;
 
-    Ok(domyn::Pattern { elements })
+    Ok(domyn::Pattern {
+        path_variable: None,
+        elements,
+    })
 }
 
 fn map_pattern_element(element: kyu::PatternElement) -> NexusParserResult<domyn::PatternElement> {
@@ -372,6 +375,7 @@ fn map_pattern_element(element: kyu::PatternElement) -> NexusParserResult<domyn:
 }
 
 fn map_node(node: kyu::NodePattern) -> NexusParserResult<domyn::NodePattern> {
+    let properties_specified = node.properties.is_some();
     let properties = match node.properties {
         Some(props) => props
             .into_iter()
@@ -388,6 +392,7 @@ fn map_node(node: kyu::NodePattern) -> NexusParserResult<domyn::NodePattern> {
             .map(|(label, _)| label.to_string())
             .collect(),
         properties,
+        properties_specified,
     })
 }
 
@@ -423,8 +428,8 @@ fn map_projection_body(
 ) -> NexusParserResult<(
     domyn::ReturnClause,
     Option<domyn::OrderByClause>,
-    Option<u64>,
-    Option<u64>,
+    Option<domyn::RowCount>,
+    Option<domyn::RowCount>,
 )> {
     let items = match projection.items {
         kyu::ProjectionItems::Expressions(items) => items
@@ -433,6 +438,7 @@ fn map_projection_body(
                 Ok(domyn::ReturnItem {
                     expr: map_expr(expr)?,
                     alias: alias.map(|(alias, _)| alias.to_string()),
+                    raw: None,
                 })
             })
             .collect::<NexusParserResult<Vec<_>>>()?,
@@ -460,8 +466,16 @@ fn map_projection_body(
         })
     };
 
-    let skip = projection.skip.map(map_u64_expression).transpose()?;
-    let limit = projection.limit.map(map_u64_expression).transpose()?;
+    let skip = projection
+        .skip
+        .map(map_u64_expression)
+        .transpose()?
+        .map(domyn::RowCount::Literal);
+    let limit = projection
+        .limit
+        .map(map_u64_expression)
+        .transpose()?
+        .map(domyn::RowCount::Literal);
 
     Ok((
         domyn::ReturnClause {
@@ -671,7 +685,7 @@ mod tests {
             other => panic!("expected STARTS WITH predicate, got {other:?}"),
         }
 
-        assert_eq!(parsed.ast.limit, Some(5));
+        assert_eq!(parsed.ast.limit, Some(domyn::RowCount::Literal(5)));
         assert!(parsed.ast.order_by.as_ref().unwrap().items[0].descending);
     }
 

@@ -31,8 +31,8 @@ pub struct Query {
     pub tail: Vec<ReadClause>,
     pub return_clause: ReturnClause,
     pub order_by: Option<OrderByClause>,
-    pub limit: Option<u64>,
-    pub skip: Option<u64>,
+    pub limit: Option<RowCount>,
+    pub skip: Option<RowCount>,
     /// If set, this query is the left side of a UNION [ALL] with another
     /// query. Represented recursively so UNION chains form a right-leaning
     /// list.
@@ -61,8 +61,8 @@ pub struct WithClause {
     pub distinct: bool,
     pub where_clause: Option<WhereClause>,
     pub order_by: Option<OrderByClause>,
-    pub skip: Option<u64>,
-    pub limit: Option<u64>,
+    pub skip: Option<RowCount>,
+    pub limit: Option<RowCount>,
 }
 
 /// A write query: optional MATCH/WHERE to bind rows, followed by one or
@@ -71,36 +71,80 @@ pub struct WithClause {
 pub struct WriteQuery {
     pub match_clause: Option<MatchClause>,
     pub where_clause: Option<WhereClause>,
+    pub tail: Vec<ReadClause>,
     pub mutations: Vec<MutationClause>,
     pub return_clause: Option<ReturnClause>,
+    pub order_by: Option<OrderByClause>,
+    pub skip: Option<RowCount>,
+    pub limit: Option<RowCount>,
 }
 
 #[derive(Debug, Clone)]
+pub enum RowCount {
+    Literal(u64),
+    Parameter(String),
+    Expr(Box<Expr>),
+}
+
+impl PartialEq for RowCount {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Literal(left), Self::Literal(right)) => left == right,
+            (Self::Parameter(left), Self::Parameter(right)) => left == right,
+            (Self::Expr(left), Self::Expr(right)) => format!("{left:?}") == format!("{right:?}"),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for RowCount {}
+
+#[derive(Debug, Clone)]
 pub enum MutationClause {
+    /// Read-side row-transform clause inside a read/write pipeline, e.g.
+    /// `CREATE ... WITH ... UNWIND ... CREATE`.
+    Read(ReadClause),
     /// CREATE (a:Label {k: v}), (b)-[:REL]->(c), ...
     Create { patterns: Vec<Pattern> },
     /// MERGE (a:Label {k: v}), (a)-[:REL]->(b)
-    Merge { patterns: Vec<Pattern> },
+    Merge {
+        patterns: Vec<Pattern>,
+        on_create: Vec<SetItem>,
+        on_match: Vec<SetItem>,
+    },
     /// SET a.name = 'Alice', r.weight = 0.5
     Set { items: Vec<SetItem> },
     /// REMOVE a.name, r.weight
     Remove { items: Vec<RemoveItem> },
     /// [DETACH] DELETE a, b, c
-    Delete {
-        variables: Vec<String>,
-        detach: bool,
-    },
+    Delete { targets: Vec<Expr>, detach: bool },
 }
 
 #[derive(Debug, Clone)]
-pub struct SetItem {
-    pub target: PropertyAccess,
-    pub value: Expr,
+pub enum SetItem {
+    /// `SET a.name = 'Alice'`
+    Property { target: PropertyAccess, value: Expr },
+    /// `SET n = {k: v}` or `SET n += {k: v}`.
+    Properties {
+        variable: String,
+        value: Expr,
+        replace: bool,
+    },
+    /// `SET n:Foo:Bar` — add labels to a node binding.
+    Labels {
+        variable: String,
+        labels: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub enum RemoveItem {
     Property(PropertyAccess),
+    /// `REMOVE n:Foo:Bar` — remove labels from a node binding.
+    Labels {
+        variable: String,
+        labels: Vec<String>,
+    },
 }
 
 /// MATCH clause: one or more pattern chains.
@@ -113,6 +157,7 @@ pub struct MatchClause {
 /// (a:Entity)-[:DISCLOSES]->(b:Metric)
 #[derive(Debug, Clone)]
 pub struct Pattern {
+    pub path_variable: Option<String>,
     pub elements: Vec<PatternElement>,
 }
 
@@ -127,6 +172,7 @@ pub struct NodePattern {
     pub variable: Option<String>,
     pub labels: Vec<String>,
     pub properties: Vec<(String, Expr)>,
+    pub properties_specified: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -174,6 +220,13 @@ pub enum Expr {
     Parameter(String),
     /// `[e1, e2, ...]`
     List(Vec<Expr>),
+    /// `[x IN xs WHERE pred | proj]`
+    ListComprehension {
+        variable: String,
+        list: Box<Expr>,
+        predicate: Option<Box<Expr>>,
+        projection: Option<Box<Expr>>,
+    },
     /// `{k1: v1, k2: v2, ...}`
     Map(Vec<(String, Expr)>),
     /// `e IN list`
@@ -192,6 +245,14 @@ pub enum Expr {
         start: Option<Box<Expr>>,
         end: Option<Box<Expr>>,
     },
+    /// Existential pattern predicate: `(n)-[:REL]->()`.
+    PatternPredicate(Pattern),
+    /// Pattern comprehension: `[p = (n)-[:REL]->() | expr]`.
+    PatternComprehension {
+        variable: Option<String>,
+        pattern: Pattern,
+        projection: Box<Expr>,
+    },
     /// CASE WHEN...THEN...ELSE...END
     Case {
         scrutinee: Option<Box<Expr>>,
@@ -200,9 +261,11 @@ pub enum Expr {
     },
     /// `count(*)`
     CountStar,
-    /// `EXISTS { MATCH ... }` — full pattern predicates not evaluated yet;
-    /// captured so the query can parse and reach the planner.
+    /// `EXISTS(expr)` — legacy function-form exists.
     Exists(Box<Expr>),
+    /// `EXISTS { MATCH ... }` or `EXISTS { (n)-->() }`.
+    /// Evaluated as a correlated read subquery against the current row.
+    ExistsSubquery(Box<Query>),
     /// `any/all/none/single(x IN xs WHERE pred)` — list predicates with a
     /// bound iteration variable scoped over the predicate.
     ListPredicate {
@@ -276,6 +339,10 @@ pub struct ReturnClause {
 pub struct ReturnItem {
     pub expr: Expr,
     pub alias: Option<String>,
+    /// Original projection text for unaliased output-column names. Cypher
+    /// clients expect `RETURN cOuNt( * )` to report exactly that expression
+    /// text as the column title unless an explicit `AS` alias is present.
+    pub raw: Option<String>,
 }
 
 /// ORDER BY clause.

@@ -48,6 +48,7 @@ pub enum LogicalPlan {
         input: Box<LogicalPlan>,
         clause: MatchClause,
         optional: bool,
+        where_predicate: Option<Predicate>,
     },
     Unwind {
         input: Box<LogicalPlan>,
@@ -64,11 +65,11 @@ pub enum LogicalPlan {
     },
     Limit {
         input: Box<LogicalPlan>,
-        count: u64,
+        count: RowCount,
     },
     Skip {
         input: Box<LogicalPlan>,
-        count: u64,
+        count: RowCount,
     },
     Distinct {
         input: Box<LogicalPlan>,
@@ -166,6 +167,7 @@ pub struct ProjectColumn {
 
 #[derive(Debug, Clone)]
 pub enum ProjectExpr {
+    Wildcard,
     Variable(String),
     Property(PropertyRef),
     Function {
@@ -199,10 +201,16 @@ pub struct AggregateOp {
 pub struct WritePlan {
     pub source: Option<LogicalPlan>,
     pub mutations: Vec<MutationOp>,
+    pub return_columns: Option<Vec<ProjectColumn>>,
+    pub return_order_by: Option<Vec<SortKey>>,
+    pub return_skip: Option<RowCount>,
+    pub return_limit: Option<RowCount>,
 }
 
 #[derive(Debug, Clone)]
 pub enum MutationOp {
+    ReadClause(ReadClause),
+    BeginMerge,
     CreateNode {
         variable: String,
         labels: Vec<String>,
@@ -225,7 +233,17 @@ pub enum MutationOp {
         src_var: String,
         dst_var: String,
         rel_type: String,
+        direction: RelDirection,
         properties: Vec<(String, PropertyValue)>,
+    },
+    BindPath {
+        variable: String,
+        node_vars: Vec<String>,
+        edge_vars: Vec<String>,
+    },
+    ApplyMergeActions {
+        on_create: Vec<MutationOp>,
+        on_match: Vec<MutationOp>,
     },
     SetProperty {
         variable: String,
@@ -236,8 +254,26 @@ pub enum MutationOp {
         variable: String,
         key: String,
     },
-    Delete {
+    /// `SET n = map` (`replace = true`) or `SET n += map`
+    /// (`replace = false`).
+    SetProperties {
         variable: String,
+        value: PropertyValue,
+        replace: bool,
+    },
+    /// `SET n:Foo:Bar` — add labels to an existing node binding.
+    SetLabels {
+        variable: String,
+        labels: Vec<String>,
+    },
+    /// `REMOVE n:Foo:Bar` — remove labels from an existing node binding.
+    RemoveLabels {
+        variable: String,
+        labels: Vec<String>,
+    },
+    Delete {
+        target: ProjectExpr,
+        variable: Option<String>,
         detach: bool,
     },
 }
@@ -256,13 +292,42 @@ pub enum PropertyValue {
 
 /// Translate a parsed write statement into a physical write plan.
 pub fn plan_write(wq: &WriteQuery) -> CypherResult<WritePlan> {
-    // Source: MATCH (+ WHERE), if present. No RETURN projection — the
-    // write executor consumes rows as binding sources for mutations.
-    let source = if wq.match_clause.is_some() {
-        let mut plan = plan_match_clause_opt(wq.match_clause.as_ref())?;
+    // Source: MATCH/WHERE plus read-pipeline clauses (`WITH`, `UNWIND`,
+    // tail `MATCH`) if present. No RETURN projection here — the write
+    // executor consumes rows as binding sources for mutations.
+    let source = if wq.match_clause.is_some() || !wq.tail.is_empty() {
+        let mut plan = if wq.match_clause.is_some() {
+            plan_initial_match(wq.match_clause.as_ref().unwrap())?
+        } else {
+            LogicalPlan::Argument
+        };
         if let Some(ref where_clause) = wq.where_clause {
             let pred = translate_predicate(&where_clause.expr)?;
             plan = push_down_predicate(plan, pred);
+        }
+        let mut tail_idx = 0usize;
+        while tail_idx < wq.tail.len() {
+            match &wq.tail[tail_idx] {
+                ReadClause::Match { optional, clause } => {
+                    let where_predicate =
+                        if let Some(ReadClause::Where(where_clause)) = wq.tail.get(tail_idx + 1) {
+                            tail_idx += 1;
+                            Some(translate_predicate(&where_clause.expr)?)
+                        } else {
+                            None
+                        };
+                    plan = LogicalPlan::ApplyMatch {
+                        input: Box::new(plan),
+                        clause: clause.clone(),
+                        optional: *optional,
+                        where_predicate,
+                    };
+                }
+                clause => {
+                    plan = plan_read_tail_clause(plan, clause)?;
+                }
+            }
+            tail_idx += 1;
         }
         Some(plan)
     } else if wq.where_clause.is_some() {
@@ -274,20 +339,26 @@ pub fn plan_write(wq: &WriteQuery) -> CypherResult<WritePlan> {
     let mut mutations = Vec::new();
     for clause in &wq.mutations {
         match clause {
+            MutationClause::Read(clause) => {
+                mutations.push(MutationOp::ReadClause(clause.clone()));
+            }
             MutationClause::Create { patterns } => {
                 translate_create_patterns(patterns, &mut mutations)?;
             }
-            MutationClause::Merge { patterns } => {
+            MutationClause::Merge {
+                patterns,
+                on_create,
+                on_match,
+            } => {
+                mutations.push(MutationOp::BeginMerge);
                 translate_merge_patterns(patterns, &mut mutations)?;
+                mutations.push(MutationOp::ApplyMergeActions {
+                    on_create: translate_set_items(on_create)?,
+                    on_match: translate_set_items(on_match)?,
+                });
             }
             MutationClause::Set { items } => {
-                for item in items {
-                    mutations.push(MutationOp::SetProperty {
-                        variable: item.target.variable.clone(),
-                        key: item.target.property.clone(),
-                        value: translate_mutation_value(&item.value)?,
-                    });
-                }
+                mutations.extend(translate_set_items(items)?);
             }
             MutationClause::Remove { items } => {
                 for item in items {
@@ -298,13 +369,23 @@ pub fn plan_write(wq: &WriteQuery) -> CypherResult<WritePlan> {
                                 key: pa.property.clone(),
                             });
                         }
+                        RemoveItem::Labels { variable, labels } => {
+                            mutations.push(MutationOp::RemoveLabels {
+                                variable: variable.clone(),
+                                labels: labels.clone(),
+                            });
+                        }
                     }
                 }
             }
-            MutationClause::Delete { variables, detach } => {
-                for var in variables {
+            MutationClause::Delete { targets, detach } => {
+                for target in targets {
                     mutations.push(MutationOp::Delete {
-                        variable: var.clone(),
+                        target: translate_project_expr(target),
+                        variable: match target {
+                            Expr::Variable(name) => Some(name.clone()),
+                            _ => None,
+                        },
                         detach: *detach,
                     });
                 }
@@ -312,7 +393,38 @@ pub fn plan_write(wq: &WriteQuery) -> CypherResult<WritePlan> {
         }
     }
 
-    Ok(WritePlan { source, mutations })
+    let return_columns = wq.return_clause.as_ref().map(|return_clause| {
+        return_clause
+            .items
+            .iter()
+            .map(|item| ProjectColumn {
+                expr: translate_project_expr(&item.expr),
+                alias: return_item_alias(item),
+            })
+            .collect()
+    });
+    let return_order_by = wq.order_by.as_ref().map(|order_by| {
+        order_by
+            .items
+            .iter()
+            .map(|item| SortKey {
+                expr: translate_project_expr(&rewrite_order_expr_for_return(
+                    &item.expr,
+                    wq.return_clause.as_ref(),
+                )),
+                descending: item.descending,
+            })
+            .collect()
+    });
+
+    Ok(WritePlan {
+        source,
+        mutations,
+        return_columns,
+        return_order_by,
+        return_skip: wq.skip.clone(),
+        return_limit: wq.limit.clone(),
+    })
 }
 
 fn translate_create_patterns(
@@ -354,9 +466,7 @@ fn translate_create_patterns(
                                 ));
                             }
                         };
-                        let rel_type = rp.rel_types.first().cloned().ok_or_else(|| {
-                            CypherError::Plan("CREATE relationship must have a type".into())
-                        })?;
+                        let rel_type = rp.rel_types.first().cloned().unwrap_or_default();
                         mutations.push(MutationOp::CreateEdge {
                             variable: rp.variable.clone(),
                             src_var: src_v,
@@ -384,27 +494,24 @@ fn translate_merge_patterns(
     for pattern in patterns {
         let mut prev_node_var: Option<String> = None;
         let mut pending_rel: Option<&RelationshipPattern> = None;
+        let mut path_node_vars = Vec::new();
+        let mut path_edge_vars = Vec::new();
 
-        for element in &pattern.elements {
+        for (idx, element) in pattern.elements.iter().enumerate() {
             match element {
                 PatternElement::Node(np) => {
-                    let var = np.variable.clone().ok_or_else(|| {
-                        CypherError::Plan("MERGE nodes must have a variable".into())
-                    })?;
+                    let var = np
+                        .variable
+                        .clone()
+                        .unwrap_or_else(|| format!("_anon_merge_{}_{}", mutations.len(), idx));
+                    path_node_vars.push(var.clone());
                     let labels = np.labels.clone();
-                    if labels.is_empty() && pending_rel.is_none() {
-                        return Err(CypherError::Plan(
-                            "MERGE of a bare node requires a label".into(),
-                        ));
-                    }
 
-                    if !labels.is_empty() {
-                        mutations.push(MutationOp::MergeNode {
-                            variable: var.clone(),
-                            labels,
-                            properties: translate_create_props(&np.properties)?,
-                        });
-                    }
+                    mutations.push(MutationOp::MergeNode {
+                        variable: var.clone(),
+                        labels,
+                        properties: translate_create_props(&np.properties)?,
+                    });
 
                     if let Some(rp) = pending_rel.take() {
                         let src = prev_node_var.clone().ok_or_else(|| {
@@ -414,20 +521,26 @@ fn translate_merge_patterns(
                         let (src_v, dst_v) = match rp.direction {
                             RelDirection::Outgoing => (src, dst),
                             RelDirection::Incoming => (dst, src),
-                            RelDirection::Both => {
-                                return Err(CypherError::Plan(
-                                    "MERGE requires a directed relationship".into(),
-                                ));
-                            }
+                            RelDirection::Both => (src, dst),
                         };
                         let rel_type = rp.rel_types.first().cloned().ok_or_else(|| {
                             CypherError::Plan("MERGE relationship must have a type".into())
                         })?;
+                        let rel_var = rp.variable.clone().or_else(|| {
+                            pattern
+                                .path_variable
+                                .as_ref()
+                                .map(|_| format!("_anon_merge_rel_{}_{}", mutations.len(), idx))
+                        });
+                        if let Some(rel_var) = &rel_var {
+                            path_edge_vars.push(rel_var.clone());
+                        }
                         mutations.push(MutationOp::MergeEdge {
-                            variable: rp.variable.clone(),
+                            variable: rel_var,
                             src_var: src_v,
                             dst_var: dst_v,
                             rel_type,
+                            direction: rp.direction,
                             properties: translate_create_props(&rp.properties)?,
                         });
                     }
@@ -438,6 +551,13 @@ fn translate_merge_patterns(
                     pending_rel = Some(rp);
                 }
             }
+        }
+        if let Some(path_variable) = &pattern.path_variable {
+            mutations.push(MutationOp::BindPath {
+                variable: path_variable.clone(),
+                node_vars: path_node_vars,
+                edge_vars: path_edge_vars,
+            });
         }
     }
     Ok(())
@@ -453,6 +573,39 @@ fn translate_create_props(props: &[(String, Expr)]) -> CypherResult<Vec<(String,
             Ok((k.clone(), pv))
         })
         .collect()
+}
+
+fn translate_set_items(items: &[SetItem]) -> CypherResult<Vec<MutationOp>> {
+    let mut mutations = Vec::new();
+    for item in items {
+        match item {
+            SetItem::Property { target, value } => {
+                mutations.push(MutationOp::SetProperty {
+                    variable: target.variable.clone(),
+                    key: target.property.clone(),
+                    value: translate_mutation_value(value)?,
+                });
+            }
+            SetItem::Properties {
+                variable,
+                value,
+                replace,
+            } => {
+                mutations.push(MutationOp::SetProperties {
+                    variable: variable.clone(),
+                    value: translate_mutation_value(value)?,
+                    replace: *replace,
+                });
+            }
+            SetItem::Labels { variable, labels } => {
+                mutations.push(MutationOp::SetLabels {
+                    variable: variable.clone(),
+                    labels: labels.clone(),
+                });
+            }
+        }
+    }
+    Ok(mutations)
 }
 
 fn translate_mutation_value(expr: &Expr) -> CypherResult<PropertyValue> {
@@ -487,7 +640,11 @@ fn plan_match_clause_opt(match_clause: Option<&MatchClause>) -> CypherResult<Log
             PatternElement::Node(np) => {
                 if plan.is_none() {
                     let variable = np.variable.clone().unwrap_or_else(|| format!("_anon_{i}"));
-                    let label = np.labels.first().cloned();
+                    let label = if np.labels.is_empty() {
+                        None
+                    } else {
+                        Some(np.labels.join(":"))
+                    };
 
                     let index_lookup = np.properties.first().map(|(key, expr)| IndexLookup {
                         property: key.clone(),
@@ -543,7 +700,23 @@ fn plan_match_clause_opt(match_clause: Option<&MatchClause>) -> CypherResult<Log
                     dst_labels: next_node.labels.clone(),
                 };
 
-                plan = Some(expand);
+                let mut next_plan = expand;
+                for (key, expr) in &next_node.properties {
+                    let predicate = Predicate::Comparison {
+                        left: PropertyRef {
+                            variable: dst_var.clone(),
+                            property: key.clone(),
+                        },
+                        op: CompareOp::Eq,
+                        right: translate_predicate_value(expr)?,
+                    };
+                    next_plan = LogicalPlan::Filter {
+                        input: Box::new(next_plan),
+                        predicate,
+                    };
+                }
+
+                plan = Some(next_plan);
                 i += 2;
             }
         }
@@ -565,8 +738,29 @@ pub fn plan_query(query: &Query) -> CypherResult<LogicalPlan> {
         plan = push_down_predicate(plan, pred);
     }
 
-    for clause in &query.tail {
-        plan = plan_read_tail_clause(plan, clause)?;
+    let mut tail_idx = 0usize;
+    while tail_idx < query.tail.len() {
+        match &query.tail[tail_idx] {
+            ReadClause::Match { optional, clause } => {
+                let where_predicate =
+                    if let Some(ReadClause::Where(where_clause)) = query.tail.get(tail_idx + 1) {
+                        tail_idx += 1;
+                        Some(translate_predicate(&where_clause.expr)?)
+                    } else {
+                        None
+                    };
+                plan = LogicalPlan::ApplyMatch {
+                    input: Box::new(plan),
+                    clause: clause.clone(),
+                    optional: *optional,
+                    where_predicate,
+                };
+            }
+            clause => {
+                plan = plan_read_tail_clause(plan, clause)?;
+            }
+        }
+        tail_idx += 1;
     }
 
     plan = plan_return_clause(plan, &query.return_clause)?;
@@ -576,7 +770,10 @@ pub fn plan_query(query: &Query) -> CypherResult<LogicalPlan> {
             .items
             .iter()
             .map(|item| SortKey {
-                expr: translate_project_expr(&item.expr),
+                expr: translate_project_expr(&rewrite_order_expr_for_return(
+                    &item.expr,
+                    Some(&query.return_clause),
+                )),
                 descending: item.descending,
             })
             .collect();
@@ -586,17 +783,17 @@ pub fn plan_query(query: &Query) -> CypherResult<LogicalPlan> {
         };
     }
 
-    if let Some(skip) = query.skip {
+    if let Some(skip) = &query.skip {
         plan = LogicalPlan::Skip {
             input: Box::new(plan),
-            count: skip,
+            count: skip.clone(),
         };
     }
 
-    if let Some(limit) = query.limit {
+    if let Some(limit) = &query.limit {
         plan = LogicalPlan::Limit {
             input: Box::new(plan),
-            count: limit,
+            count: limit.clone(),
         };
     }
 
@@ -612,6 +809,109 @@ pub fn plan_query(query: &Query) -> CypherResult<LogicalPlan> {
     Ok(plan)
 }
 
+fn rewrite_order_expr_for_return(expr: &Expr, return_clause: Option<&ReturnClause>) -> Expr {
+    if let Some(return_clause) = return_clause {
+        let alias = expr_alias(expr);
+        for item in &return_clause.items {
+            if expr_alias(&item.expr) == alias {
+                return Expr::Variable(return_item_alias(item));
+            }
+        }
+    }
+
+    match expr {
+        Expr::BinaryOp { left, op, right } => Expr::BinaryOp {
+            left: Box::new(rewrite_order_expr_for_return(left, return_clause)),
+            op: *op,
+            right: Box::new(rewrite_order_expr_for_return(right, return_clause)),
+        },
+        Expr::UnaryOp { op, expr } => Expr::UnaryOp {
+            op: *op,
+            expr: Box::new(rewrite_order_expr_for_return(expr, return_clause)),
+        },
+        Expr::FunctionCall { name, args } => Expr::FunctionCall {
+            name: name.clone(),
+            args: args
+                .iter()
+                .map(|arg| rewrite_order_expr_for_return(arg, return_clause))
+                .collect(),
+        },
+        Expr::List(items) => Expr::List(
+            items
+                .iter()
+                .map(|item| rewrite_order_expr_for_return(item, return_clause))
+                .collect(),
+        ),
+        Expr::Map(entries) => Expr::Map(
+            entries
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        key.clone(),
+                        rewrite_order_expr_for_return(value, return_clause),
+                    )
+                })
+                .collect(),
+        ),
+        Expr::In { expr, list } => Expr::In {
+            expr: Box::new(rewrite_order_expr_for_return(expr, return_clause)),
+            list: Box::new(rewrite_order_expr_for_return(list, return_clause)),
+        },
+        Expr::Index { target, index } => Expr::Index {
+            target: Box::new(rewrite_order_expr_for_return(target, return_clause)),
+            index: Box::new(rewrite_order_expr_for_return(index, return_clause)),
+        },
+        Expr::Slice { target, start, end } => Expr::Slice {
+            target: Box::new(rewrite_order_expr_for_return(target, return_clause)),
+            start: start
+                .as_deref()
+                .map(|expr| Box::new(rewrite_order_expr_for_return(expr, return_clause))),
+            end: end
+                .as_deref()
+                .map(|expr| Box::new(rewrite_order_expr_for_return(expr, return_clause))),
+        },
+        Expr::Case {
+            scrutinee,
+            arms,
+            default,
+        } => Expr::Case {
+            scrutinee: scrutinee
+                .as_deref()
+                .map(|expr| Box::new(rewrite_order_expr_for_return(expr, return_clause))),
+            arms: arms
+                .iter()
+                .map(|(when, then)| {
+                    (
+                        rewrite_order_expr_for_return(when, return_clause),
+                        rewrite_order_expr_for_return(then, return_clause),
+                    )
+                })
+                .collect(),
+            default: default
+                .as_deref()
+                .map(|expr| Box::new(rewrite_order_expr_for_return(expr, return_clause))),
+        },
+        Expr::Exists(inner) => Expr::Exists(Box::new(rewrite_order_expr_for_return(
+            inner,
+            return_clause,
+        ))),
+        Expr::ListPredicate {
+            kind,
+            variable,
+            list,
+            predicate,
+        } => Expr::ListPredicate {
+            kind: *kind,
+            variable: variable.clone(),
+            list: Box::new(rewrite_order_expr_for_return(list, return_clause)),
+            predicate: predicate
+                .as_deref()
+                .map(|expr| Box::new(rewrite_order_expr_for_return(expr, return_clause))),
+        },
+        _ => expr.clone(),
+    }
+}
+
 fn plan_initial_match(match_clause: &MatchClause) -> CypherResult<LogicalPlan> {
     if match_clause.patterns.is_empty() {
         return Err(CypherError::Plan("empty MATCH clause".into()));
@@ -625,6 +925,7 @@ fn plan_initial_match(match_clause: &MatchClause) -> CypherResult<LogicalPlan> {
             input: Box::new(LogicalPlan::Argument),
             clause: first,
             optional: false,
+            where_predicate: None,
         }
     } else {
         plan_match_clause_opt(Some(&first))?
@@ -637,6 +938,7 @@ fn plan_initial_match(match_clause: &MatchClause) -> CypherResult<LogicalPlan> {
                     patterns: vec![pattern.clone()],
                 },
                 optional: false,
+                where_predicate: None,
             };
         }
     }
@@ -644,13 +946,32 @@ fn plan_initial_match(match_clause: &MatchClause) -> CypherResult<LogicalPlan> {
 }
 
 fn pattern_needs_match_engine(pattern: &Pattern) -> bool {
+    if pattern.path_variable.is_some() {
+        return true;
+    }
+    let mut seen_nodes = std::collections::HashSet::new();
+    let mut seen_relationships = std::collections::HashSet::new();
     let mut relationships = 0usize;
     let mut variable_length_relationship_binding = false;
     for element in &pattern.elements {
-        if let PatternElement::Relationship(rel) = element {
-            relationships += 1;
-            if rel.variable.is_some() && (rel.min_hops.is_some() || rel.max_hops.is_some()) {
-                variable_length_relationship_binding = true;
+        match element {
+            PatternElement::Node(node) => {
+                if let Some(var) = &node.variable {
+                    if !seen_nodes.insert(var) {
+                        return true;
+                    }
+                }
+            }
+            PatternElement::Relationship(rel) => {
+                relationships += 1;
+                if let Some(var) = &rel.variable {
+                    if !seen_relationships.insert(var) {
+                        return true;
+                    }
+                    if rel.min_hops.is_some() || rel.max_hops.is_some() {
+                        variable_length_relationship_binding = true;
+                    }
+                }
             }
         }
     }
@@ -663,6 +984,7 @@ fn plan_read_tail_clause(input: LogicalPlan, clause: &ReadClause) -> CypherResul
             input: Box::new(input),
             clause: clause.clone(),
             optional: *optional,
+            where_predicate: None,
         }),
         ReadClause::Where(where_clause) => Ok(LogicalPlan::Filter {
             input: Box::new(input),
@@ -678,51 +1000,200 @@ fn plan_read_tail_clause(input: LogicalPlan, clause: &ReadClause) -> CypherResul
 }
 
 fn plan_with_clause(input: LogicalPlan, with_clause: &WithClause) -> CypherResult<LogicalPlan> {
-    let mut plan = plan_return_clause(
-        input,
-        &ReturnClause {
-            items: with_clause.items.clone(),
-            distinct: with_clause.distinct,
-        },
-    )?;
+    let aliases: Vec<String> = with_clause.items.iter().map(return_item_alias).collect();
+
+    let mut input = input;
+    let projection_clause = ReturnClause {
+        items: with_clause.items.clone(),
+        distinct: with_clause.distinct,
+    };
+    let has_aggregation = with_clause
+        .items
+        .iter()
+        .any(|item| expr_contains_aggregate(&item.expr));
+
+    if !has_aggregation {
+        if let Some(where_clause) = &with_clause.where_clause {
+            let referenced = expr_referenced_variables(&where_clause.expr);
+            let mixed_alias_and_input_refs = referenced.iter().any(|name| aliases.contains(name))
+                && referenced.iter().any(|name| !aliases.contains(name));
+            if mixed_alias_and_input_refs {
+                let mut intermediate_items = with_clause.items.clone();
+                for name in referenced.iter().filter(|name| !aliases.contains(*name)) {
+                    intermediate_items.push(ReturnItem {
+                        expr: Expr::Variable(name.clone()),
+                        alias: Some(name.clone()),
+                        raw: Some(name.clone()),
+                    });
+                }
+                let intermediate_clause = ReturnClause {
+                    items: intermediate_items,
+                    distinct: false,
+                };
+                let mut plan = plan_return_clause(input, &intermediate_clause)?;
+                plan = LogicalPlan::Filter {
+                    input: Box::new(plan),
+                    predicate: translate_predicate(&where_clause.expr)?,
+                };
+                plan = plan_return_clause(plan, &projection_clause)?;
+                if with_clause.distinct {
+                    plan = LogicalPlan::Distinct {
+                        input: Box::new(plan),
+                    };
+                }
+                if let Some(order_by) = &with_clause.order_by {
+                    let keys: Vec<SortKey> = order_by
+                        .items
+                        .iter()
+                        .map(|item| SortKey {
+                            expr: translate_project_expr(&rewrite_order_expr_for_return(
+                                &item.expr,
+                                Some(&projection_clause),
+                            )),
+                            descending: item.descending,
+                        })
+                        .collect();
+                    plan = LogicalPlan::Sort {
+                        input: Box::new(plan),
+                        keys,
+                    };
+                }
+                if let Some(skip) = &with_clause.skip {
+                    plan = LogicalPlan::Skip {
+                        input: Box::new(plan),
+                        count: skip.clone(),
+                    };
+                }
+                if let Some(limit) = &with_clause.limit {
+                    plan = LogicalPlan::Limit {
+                        input: Box::new(plan),
+                        count: limit.clone(),
+                    };
+                }
+                return Ok(plan);
+            }
+        }
+    }
+
+    let filter_after_projection = with_clause
+        .where_clause
+        .as_ref()
+        .is_some_and(|where_clause| {
+            let referenced = expr_referenced_variables(&where_clause.expr);
+            !referenced.is_empty() && referenced.iter().all(|name| aliases.contains(name))
+        });
 
     if let Some(where_clause) = &with_clause.where_clause {
-        plan = LogicalPlan::Filter {
-            input: Box::new(plan),
-            predicate: translate_predicate(&where_clause.expr)?,
-        };
+        if !filter_after_projection {
+            input = LogicalPlan::Filter {
+                input: Box::new(input),
+                predicate: translate_predicate(&where_clause.expr)?,
+            };
+        }
     }
 
-    if let Some(order_by) = &with_clause.order_by {
-        let keys: Vec<SortKey> = order_by
-            .items
-            .iter()
-            .map(|item| SortKey {
-                expr: translate_project_expr(&item.expr),
-                descending: item.descending,
+    let order_before_projection = !has_aggregation
+        && with_clause.order_by.as_ref().is_some_and(|order_by| {
+            order_by.items.iter().any(|item| {
+                !order_expr_available_after_projection(&item.expr, &projection_clause, &aliases)
             })
-            .collect();
-        plan = LogicalPlan::Sort {
-            input: Box::new(plan),
-            keys,
-        };
+        });
+
+    if order_before_projection {
+        if let Some(order_by) = &with_clause.order_by {
+            let keys: Vec<SortKey> = order_by
+                .items
+                .iter()
+                .map(|item| SortKey {
+                    expr: translate_project_expr(&item.expr),
+                    descending: item.descending,
+                })
+                .collect();
+            input = LogicalPlan::Sort {
+                input: Box::new(input),
+                keys,
+            };
+        }
+
+        if let Some(skip) = &with_clause.skip {
+            input = LogicalPlan::Skip {
+                input: Box::new(input),
+                count: skip.clone(),
+            };
+        }
+
+        if let Some(limit) = &with_clause.limit {
+            input = LogicalPlan::Limit {
+                input: Box::new(input),
+                count: limit.clone(),
+            };
+        }
     }
 
-    if let Some(skip) = with_clause.skip {
-        plan = LogicalPlan::Skip {
-            input: Box::new(plan),
-            count: skip,
-        };
+    let mut plan = plan_return_clause(input, &projection_clause)?;
+
+    if let Some(where_clause) = &with_clause.where_clause {
+        if filter_after_projection {
+            plan = LogicalPlan::Filter {
+                input: Box::new(plan),
+                predicate: translate_predicate(&where_clause.expr)?,
+            };
+        }
     }
 
-    if let Some(limit) = with_clause.limit {
-        plan = LogicalPlan::Limit {
-            input: Box::new(plan),
-            count: limit,
-        };
+    if !order_before_projection {
+        if let Some(order_by) = &with_clause.order_by {
+            let keys: Vec<SortKey> = order_by
+                .items
+                .iter()
+                .map(|item| SortKey {
+                    expr: translate_project_expr(&rewrite_order_expr_for_return(
+                        &item.expr,
+                        Some(&projection_clause),
+                    )),
+                    descending: item.descending,
+                })
+                .collect();
+            plan = LogicalPlan::Sort {
+                input: Box::new(plan),
+                keys,
+            };
+        }
+    }
+
+    if !order_before_projection {
+        if let Some(skip) = &with_clause.skip {
+            plan = LogicalPlan::Skip {
+                input: Box::new(plan),
+                count: skip.clone(),
+            };
+        }
+
+        if let Some(limit) = &with_clause.limit {
+            plan = LogicalPlan::Limit {
+                input: Box::new(plan),
+                count: limit.clone(),
+            };
+        }
     }
 
     Ok(plan)
+}
+
+fn order_expr_available_after_projection(
+    expr: &Expr,
+    projection_clause: &ReturnClause,
+    aliases: &[String],
+) -> bool {
+    let order_alias = expr_alias(expr);
+    if projection_clause.items.iter().any(|item| {
+        item.alias.as_deref() == Some(order_alias.as_str()) || expr_alias(&item.expr) == order_alias
+    }) {
+        return true;
+    }
+
+    let referenced = expr_referenced_variables(expr);
+    !referenced.is_empty() && referenced.iter().all(|name| aliases.contains(name))
 }
 
 fn extract_last_variable(plan: &Option<LogicalPlan>) -> String {
@@ -761,8 +1232,12 @@ fn translate_predicate(expr: &Expr) -> CypherResult<Predicate> {
                 Ok(Predicate::Or(Box::new(l), Box::new(r)))
             }
             BinaryOp::Contains => {
-                let prop = expr_to_property_ref(left)?;
-                let pattern = expr_to_string_value(right)?;
+                let Ok(prop) = expr_to_property_ref(left) else {
+                    return Ok(Predicate::Expr(expr.clone()));
+                };
+                let Ok(pattern) = expr_to_string_value(right) else {
+                    return Ok(Predicate::Expr(expr.clone()));
+                };
                 Ok(Predicate::StringOp {
                     property: prop,
                     op: StringPredOp::Contains,
@@ -770,8 +1245,12 @@ fn translate_predicate(expr: &Expr) -> CypherResult<Predicate> {
                 })
             }
             BinaryOp::StartsWith => {
-                let prop = expr_to_property_ref(left)?;
-                let pattern = expr_to_string_value(right)?;
+                let Ok(prop) = expr_to_property_ref(left) else {
+                    return Ok(Predicate::Expr(expr.clone()));
+                };
+                let Ok(pattern) = expr_to_string_value(right) else {
+                    return Ok(Predicate::Expr(expr.clone()));
+                };
                 Ok(Predicate::StringOp {
                     property: prop,
                     op: StringPredOp::StartsWith,
@@ -779,8 +1258,12 @@ fn translate_predicate(expr: &Expr) -> CypherResult<Predicate> {
                 })
             }
             BinaryOp::EndsWith => {
-                let prop = expr_to_property_ref(left)?;
-                let pattern = expr_to_string_value(right)?;
+                let Ok(prop) = expr_to_property_ref(left) else {
+                    return Ok(Predicate::Expr(expr.clone()));
+                };
+                let Ok(pattern) = expr_to_string_value(right) else {
+                    return Ok(Predicate::Expr(expr.clone()));
+                };
                 Ok(Predicate::StringOp {
                     property: prop,
                     op: StringPredOp::EndsWith,
@@ -798,7 +1281,9 @@ fn translate_predicate(expr: &Expr) -> CypherResult<Predicate> {
                         | BinaryOp::Gte
                 ) {
                     if let Ok(left_ref) = expr_to_property_ref(left) {
-                        let right_val = translate_predicate_value(right)?;
+                        let Ok(right_val) = translate_predicate_value(right) else {
+                            return Ok(Predicate::Expr(expr.clone()));
+                        };
                         let compare_op = match op {
                             BinaryOp::Eq => CompareOp::Eq,
                             BinaryOp::Neq => CompareOp::Neq,
@@ -822,7 +1307,10 @@ fn translate_predicate(expr: &Expr) -> CypherResult<Predicate> {
             }
         },
         Expr::UnaryOp { op, expr } => match op {
-            UnaryOp::Not => Ok(Predicate::Not(Box::new(translate_predicate(expr)?))),
+            UnaryOp::Not => Ok(Predicate::Expr(Expr::UnaryOp {
+                op: UnaryOp::Not,
+                expr: expr.clone(),
+            })),
             UnaryOp::IsNull => expr_to_property_ref(expr)
                 .map(Predicate::IsNull)
                 .or_else(|_| {
@@ -993,6 +1481,7 @@ fn push_down_predicate(plan: LogicalPlan, predicate: Predicate) -> LogicalPlan {
             input,
             clause,
             optional,
+            where_predicate,
         } => {
             if matches!(input.as_ref(), LogicalPlan::Argument) {
                 if let Some((seed_var, seed_label)) = match_seed_node(&clause) {
@@ -1006,6 +1495,7 @@ fn push_down_predicate(plan: LogicalPlan, predicate: Predicate) -> LogicalPlan {
                             input: Box::new(push_down_predicate(seed_scan, predicate)),
                             clause,
                             optional,
+                            where_predicate,
                         };
                     }
                 }
@@ -1016,6 +1506,7 @@ fn push_down_predicate(plan: LogicalPlan, predicate: Predicate) -> LogicalPlan {
                     input,
                     clause,
                     optional,
+                    where_predicate,
                 }),
                 predicate,
             }
@@ -1032,7 +1523,12 @@ fn match_seed_node(clause: &MatchClause) -> Option<(String, Option<String>)> {
     let PatternElement::Node(node) = pattern.elements.first()? else {
         return None;
     };
-    Some((node.variable.clone()?, node.labels.first().cloned()))
+    let labels = if node.labels.is_empty() {
+        None
+    } else {
+        Some(node.labels.join(":"))
+    };
+    Some((node.variable.clone()?, labels))
 }
 
 fn predicate_references_only_variable(predicate: &Predicate, variable: &str) -> bool {
@@ -1051,7 +1547,7 @@ fn predicate_references_only_variable(predicate: &Predicate, variable: &str) -> 
         Predicate::Not(inner) => predicate_references_only_variable(inner, variable),
         Predicate::IsNull(prop) | Predicate::IsNotNull(prop) => prop.variable == variable,
         Predicate::StringOp { property, .. } => property.variable == variable,
-        Predicate::Expr(_) => false,
+        Predicate::Expr(expr) => expr_references_only_variable(expr, variable),
     }
 }
 
@@ -1071,7 +1567,155 @@ fn predicate_references_variable(predicate: &Predicate, variable: &str) -> bool 
         Predicate::Not(inner) => predicate_references_variable(inner, variable),
         Predicate::IsNull(prop) | Predicate::IsNotNull(prop) => prop.variable == variable,
         Predicate::StringOp { property, .. } => property.variable == variable,
-        Predicate::Expr(_) => false,
+        Predicate::Expr(expr) => expr_references_variable(expr, variable),
+    }
+}
+
+fn expr_references_only_variable(expr: &Expr, variable: &str) -> bool {
+    let referenced = expr_referenced_variables(expr);
+    !referenced.is_empty() && referenced.iter().all(|name| name == variable)
+}
+
+fn expr_references_variable(expr: &Expr, variable: &str) -> bool {
+    expr_referenced_variables(expr)
+        .iter()
+        .any(|name| name == variable)
+}
+
+fn expr_referenced_variables(expr: &Expr) -> Vec<String> {
+    let mut vars = Vec::new();
+    collect_expr_variables(expr, &mut vars);
+    vars.sort();
+    vars.dedup();
+    vars
+}
+
+fn collect_expr_variables(expr: &Expr, vars: &mut Vec<String>) {
+    match expr {
+        Expr::Variable(var) => vars.push(var.clone()),
+        Expr::Property(prop) => vars.push(prop.variable.clone()),
+        Expr::Parameter(_) | Expr::Literal(_) | Expr::CountStar => {}
+        Expr::List(items) => {
+            for item in items {
+                collect_expr_variables(item, vars);
+            }
+        }
+        Expr::ListComprehension {
+            variable,
+            list,
+            predicate,
+            projection,
+        } => {
+            collect_expr_variables(list, vars);
+            let mut local = Vec::new();
+            if let Some(predicate) = predicate {
+                collect_expr_variables(predicate, &mut local);
+            }
+            if let Some(projection) = projection {
+                collect_expr_variables(projection, &mut local);
+            }
+            vars.extend(local.into_iter().filter(|name| name != variable));
+        }
+        Expr::Map(entries) => {
+            for (_, value) in entries {
+                collect_expr_variables(value, vars);
+            }
+        }
+        Expr::In { expr, list } => {
+            collect_expr_variables(expr, vars);
+            collect_expr_variables(list, vars);
+        }
+        Expr::Index { target, index } => {
+            collect_expr_variables(target, vars);
+            collect_expr_variables(index, vars);
+        }
+        Expr::Slice { target, start, end } => {
+            collect_expr_variables(target, vars);
+            if let Some(start) = start {
+                collect_expr_variables(start, vars);
+            }
+            if let Some(end) = end {
+                collect_expr_variables(end, vars);
+            }
+        }
+        Expr::PatternPredicate(pattern) => {
+            for element in &pattern.elements {
+                match element {
+                    PatternElement::Node(node) => {
+                        if let Some(var) = &node.variable {
+                            vars.push(var.clone());
+                        }
+                    }
+                    PatternElement::Relationship(rel) => {
+                        if let Some(var) = &rel.variable {
+                            vars.push(var.clone());
+                        }
+                    }
+                }
+            }
+        }
+        Expr::PatternComprehension {
+            pattern,
+            projection,
+            ..
+        } => {
+            for element in &pattern.elements {
+                match element {
+                    PatternElement::Node(node) => {
+                        if let Some(var) = &node.variable {
+                            vars.push(var.clone());
+                        }
+                    }
+                    PatternElement::Relationship(rel) => {
+                        if let Some(var) = &rel.variable {
+                            vars.push(var.clone());
+                        }
+                    }
+                }
+            }
+            collect_expr_variables(projection, vars);
+        }
+        Expr::Case {
+            scrutinee,
+            arms,
+            default,
+        } => {
+            if let Some(scrutinee) = scrutinee {
+                collect_expr_variables(scrutinee, vars);
+            }
+            for (when_expr, then_expr) in arms {
+                collect_expr_variables(when_expr, vars);
+                collect_expr_variables(then_expr, vars);
+            }
+            if let Some(default) = default {
+                collect_expr_variables(default, vars);
+            }
+        }
+        Expr::UnaryOp { expr, .. } => collect_expr_variables(expr, vars),
+        Expr::BinaryOp { left, right, .. } => {
+            collect_expr_variables(left, vars);
+            collect_expr_variables(right, vars);
+        }
+        Expr::FunctionCall { args, .. } => {
+            for arg in args {
+                collect_expr_variables(arg, vars);
+            }
+        }
+        Expr::Exists(inner) => collect_expr_variables(inner, vars),
+        Expr::ExistsSubquery(_) => {}
+        Expr::ListPredicate {
+            variable,
+            list,
+            predicate,
+            ..
+        } => {
+            collect_expr_variables(list, vars);
+            let mut local = Vec::new();
+            if let Some(predicate) = predicate {
+                collect_expr_variables(predicate, &mut local);
+            }
+            vars.extend(local.into_iter().filter(|name| name != variable));
+        }
     }
 }
 
@@ -1083,29 +1727,58 @@ fn plan_return_clause(
     let mut aggregations = Vec::new();
     let mut group_by = Vec::new();
     let mut columns = Vec::new();
+    let mut aggregate_projection = Vec::new();
+    let mut next_agg_alias = 0usize;
 
     for item in &return_clause.items {
-        let alias = item.alias.clone().unwrap_or_else(|| expr_alias(&item.expr));
-        let project_expr = translate_project_expr(&item.expr);
+        let alias = return_item_alias(item);
 
         if is_aggregate_expr(&item.expr) {
             aggregations.push(translate_aggregate_op(&item.expr, alias.clone())?);
             has_aggregation = true;
+            aggregate_projection.push(ProjectColumn {
+                expr: ProjectExpr::Variable(alias.clone()),
+                alias,
+            });
+        } else if expr_contains_aggregate(&item.expr) {
+            let rewritten =
+                extract_nested_aggregates(&item.expr, &mut aggregations, &mut next_agg_alias)?;
+            has_aggregation = true;
+            aggregate_projection.push(ProjectColumn {
+                expr: translate_project_expr(&rewritten),
+                alias,
+            });
         } else {
+            let project_expr = translate_project_expr(&item.expr);
             let column = ProjectColumn {
                 expr: project_expr,
-                alias,
+                alias: alias.clone(),
             };
             group_by.push(column.clone());
             columns.push(column);
+            aggregate_projection.push(ProjectColumn {
+                expr: ProjectExpr::Variable(alias.clone()),
+                alias,
+            });
         }
     }
 
     let plan = if has_aggregation {
-        LogicalPlan::Aggregate {
+        let aggregate = LogicalPlan::Aggregate {
             input: Box::new(input),
             group_by,
             aggregations,
+        };
+        let project = LogicalPlan::Project {
+            input: Box::new(aggregate),
+            columns: aggregate_projection,
+        };
+        if return_clause.distinct {
+            LogicalPlan::Distinct {
+                input: Box::new(project),
+            }
+        } else {
+            project
         }
     } else {
         let plan = LogicalPlan::Project {
@@ -1123,6 +1796,16 @@ fn plan_return_clause(
     };
 
     Ok(plan)
+}
+
+fn return_item_alias(item: &ReturnItem) -> String {
+    if let Some(alias) = &item.alias {
+        return alias.clone();
+    }
+    if matches!(item.expr, Expr::CountStar) && item.raw.as_deref() == Some("*") {
+        return expr_alias(&item.expr);
+    }
+    item.raw.clone().unwrap_or_else(|| expr_alias(&item.expr))
 }
 
 fn translate_aggregate_op(expr: &Expr, alias: String) -> CypherResult<AggregateOp> {
@@ -1171,6 +1854,7 @@ fn translate_aggregate_op(expr: &Expr, alias: String) -> CypherResult<AggregateO
 
 fn translate_project_expr(expr: &Expr) -> ProjectExpr {
     match expr {
+        Expr::Variable(v) if v == "*" => ProjectExpr::Wildcard,
         Expr::Variable(v) => ProjectExpr::Variable(v.clone()),
         Expr::Property(pa) => ProjectExpr::Property(PropertyRef {
             variable: pa.variable.clone(),
@@ -1194,6 +1878,219 @@ fn is_aggregate_expr(expr: &Expr) -> bool {
         || matches!(expr, Expr::FunctionCall { name, .. } if is_aggregate_name(name))
 }
 
+fn expr_contains_aggregate(expr: &Expr) -> bool {
+    if is_aggregate_expr(expr) {
+        return true;
+    }
+    match expr {
+        Expr::Literal(_) | Expr::Property(_) | Expr::Variable(_) | Expr::Parameter(_) => false,
+        Expr::List(items) => items.iter().any(expr_contains_aggregate),
+        Expr::ListComprehension {
+            list,
+            predicate,
+            projection,
+            ..
+        } => {
+            expr_contains_aggregate(list)
+                || predicate.as_deref().is_some_and(expr_contains_aggregate)
+                || projection.as_deref().is_some_and(expr_contains_aggregate)
+        }
+        Expr::Map(entries) => entries
+            .iter()
+            .any(|(_, value)| expr_contains_aggregate(value)),
+        Expr::In { expr, list } => expr_contains_aggregate(expr) || expr_contains_aggregate(list),
+        Expr::Index { target, index } => {
+            expr_contains_aggregate(target) || expr_contains_aggregate(index)
+        }
+        Expr::Slice { target, start, end } => {
+            expr_contains_aggregate(target)
+                || start.as_deref().is_some_and(expr_contains_aggregate)
+                || end.as_deref().is_some_and(expr_contains_aggregate)
+        }
+        Expr::PatternPredicate(_) => false,
+        Expr::PatternComprehension { projection, .. } => expr_contains_aggregate(projection),
+        Expr::Case {
+            scrutinee,
+            arms,
+            default,
+        } => {
+            scrutinee.as_deref().is_some_and(expr_contains_aggregate)
+                || arms.iter().any(|(when_expr, then_expr)| {
+                    expr_contains_aggregate(when_expr) || expr_contains_aggregate(then_expr)
+                })
+                || default.as_deref().is_some_and(expr_contains_aggregate)
+        }
+        Expr::UnaryOp { expr, .. } => expr_contains_aggregate(expr),
+        Expr::BinaryOp { left, right, .. } => {
+            expr_contains_aggregate(left) || expr_contains_aggregate(right)
+        }
+        Expr::FunctionCall { args, .. } => args.iter().any(expr_contains_aggregate),
+        Expr::CountStar => true,
+        Expr::Exists(inner) => expr_contains_aggregate(inner),
+        Expr::ExistsSubquery(_) => false,
+        Expr::ListPredicate {
+            list, predicate, ..
+        } => {
+            expr_contains_aggregate(list)
+                || predicate.as_deref().is_some_and(expr_contains_aggregate)
+        }
+    }
+}
+
+fn extract_nested_aggregates(
+    expr: &Expr,
+    aggregations: &mut Vec<AggregateOp>,
+    next_alias: &mut usize,
+) -> CypherResult<Expr> {
+    if is_aggregate_expr(expr) {
+        let alias = format!("__agg_{next_alias}");
+        *next_alias += 1;
+        aggregations.push(translate_aggregate_op(expr, alias.clone())?);
+        return Ok(Expr::Variable(alias));
+    }
+
+    match expr {
+        Expr::Literal(_)
+        | Expr::Property(_)
+        | Expr::Variable(_)
+        | Expr::Parameter(_)
+        | Expr::CountStar => Ok(expr.clone()),
+        Expr::List(items) => Ok(Expr::List(
+            items
+                .iter()
+                .map(|item| extract_nested_aggregates(item, aggregations, next_alias))
+                .collect::<CypherResult<Vec<_>>>()?,
+        )),
+        Expr::ListComprehension {
+            variable,
+            list,
+            predicate,
+            projection,
+        } => Ok(Expr::ListComprehension {
+            variable: variable.clone(),
+            list: Box::new(extract_nested_aggregates(list, aggregations, next_alias)?),
+            predicate: predicate
+                .as_deref()
+                .map(|expr| extract_nested_aggregates(expr, aggregations, next_alias))
+                .transpose()?
+                .map(Box::new),
+            projection: projection
+                .as_deref()
+                .map(|expr| extract_nested_aggregates(expr, aggregations, next_alias))
+                .transpose()?
+                .map(Box::new),
+        }),
+        Expr::Map(entries) => Ok(Expr::Map(
+            entries
+                .iter()
+                .map(|(key, value)| {
+                    Ok((
+                        key.clone(),
+                        extract_nested_aggregates(value, aggregations, next_alias)?,
+                    ))
+                })
+                .collect::<CypherResult<Vec<_>>>()?,
+        )),
+        Expr::In { expr, list } => Ok(Expr::In {
+            expr: Box::new(extract_nested_aggregates(expr, aggregations, next_alias)?),
+            list: Box::new(extract_nested_aggregates(list, aggregations, next_alias)?),
+        }),
+        Expr::Index { target, index } => Ok(Expr::Index {
+            target: Box::new(extract_nested_aggregates(target, aggregations, next_alias)?),
+            index: Box::new(extract_nested_aggregates(index, aggregations, next_alias)?),
+        }),
+        Expr::Slice { target, start, end } => Ok(Expr::Slice {
+            target: Box::new(extract_nested_aggregates(target, aggregations, next_alias)?),
+            start: start
+                .as_deref()
+                .map(|expr| extract_nested_aggregates(expr, aggregations, next_alias))
+                .transpose()?
+                .map(Box::new),
+            end: end
+                .as_deref()
+                .map(|expr| extract_nested_aggregates(expr, aggregations, next_alias))
+                .transpose()?
+                .map(Box::new),
+        }),
+        Expr::PatternPredicate(_) => Ok(expr.clone()),
+        Expr::PatternComprehension {
+            variable,
+            pattern,
+            projection,
+        } => Ok(Expr::PatternComprehension {
+            variable: variable.clone(),
+            pattern: pattern.clone(),
+            projection: Box::new(extract_nested_aggregates(
+                projection,
+                aggregations,
+                next_alias,
+            )?),
+        }),
+        Expr::Case {
+            scrutinee,
+            arms,
+            default,
+        } => Ok(Expr::Case {
+            scrutinee: scrutinee
+                .as_deref()
+                .map(|expr| extract_nested_aggregates(expr, aggregations, next_alias))
+                .transpose()?
+                .map(Box::new),
+            arms: arms
+                .iter()
+                .map(|(when_expr, then_expr)| {
+                    Ok((
+                        extract_nested_aggregates(when_expr, aggregations, next_alias)?,
+                        extract_nested_aggregates(then_expr, aggregations, next_alias)?,
+                    ))
+                })
+                .collect::<CypherResult<Vec<_>>>()?,
+            default: default
+                .as_deref()
+                .map(|expr| extract_nested_aggregates(expr, aggregations, next_alias))
+                .transpose()?
+                .map(Box::new),
+        }),
+        Expr::UnaryOp { op, expr } => Ok(Expr::UnaryOp {
+            op: *op,
+            expr: Box::new(extract_nested_aggregates(expr, aggregations, next_alias)?),
+        }),
+        Expr::BinaryOp { left, op, right } => Ok(Expr::BinaryOp {
+            left: Box::new(extract_nested_aggregates(left, aggregations, next_alias)?),
+            op: *op,
+            right: Box::new(extract_nested_aggregates(right, aggregations, next_alias)?),
+        }),
+        Expr::FunctionCall { name, args } => Ok(Expr::FunctionCall {
+            name: name.clone(),
+            args: args
+                .iter()
+                .map(|arg| extract_nested_aggregates(arg, aggregations, next_alias))
+                .collect::<CypherResult<Vec<_>>>()?,
+        }),
+        Expr::Exists(inner) => Ok(Expr::Exists(Box::new(extract_nested_aggregates(
+            inner,
+            aggregations,
+            next_alias,
+        )?))),
+        Expr::ExistsSubquery(_) => Ok(expr.clone()),
+        Expr::ListPredicate {
+            kind,
+            variable,
+            list,
+            predicate,
+        } => Ok(Expr::ListPredicate {
+            kind: *kind,
+            variable: variable.clone(),
+            list: Box::new(extract_nested_aggregates(list, aggregations, next_alias)?),
+            predicate: predicate
+                .as_deref()
+                .map(|expr| extract_nested_aggregates(expr, aggregations, next_alias))
+                .transpose()?
+                .map(Box::new),
+        }),
+    }
+}
+
 fn is_aggregate_name(name: &str) -> bool {
     matches!(
         name.to_lowercase().as_str(),
@@ -1205,8 +2102,117 @@ fn expr_alias(expr: &Expr) -> String {
     match expr {
         Expr::Variable(v) => v.clone(),
         Expr::Property(pa) => format!("{}.{}", pa.variable, pa.property),
+        Expr::Literal(lit) => match lit {
+            Literal::Integer(v) => v.to_string(),
+            Literal::Float(v) => {
+                if v.fract() == 0.0 {
+                    format!("{v:.1}")
+                } else {
+                    v.to_string()
+                }
+            }
+            Literal::String(v) => format!("'{v}'"),
+            Literal::Bool(v) => v.to_string(),
+            Literal::Null => "null".into(),
+        },
+        Expr::List(items) => format!(
+            "[{}]",
+            items.iter().map(expr_alias).collect::<Vec<_>>().join(", ")
+        ),
+        Expr::ListComprehension {
+            variable,
+            list,
+            predicate,
+            projection,
+        } => {
+            let mut out = format!("[{variable} IN {}", expr_alias(list));
+            if let Some(predicate) = predicate {
+                out.push_str(&format!(" WHERE {}", expr_alias(predicate)));
+            }
+            if let Some(projection) = projection {
+                out.push_str(&format!(" | {}", expr_alias(projection)));
+            }
+            out.push(']');
+            out
+        }
+        Expr::Map(entries) => format!(
+            "{{{}}}",
+            entries
+                .iter()
+                .map(|(key, value)| format!("{key}: {}", expr_alias(value)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Expr::In { expr, list } => format!("{} IN {}", expr_alias(expr), expr_alias(list)),
+        Expr::Index { target, index } => {
+            if let Expr::Literal(Literal::String(property)) = index.as_ref() {
+                if matches!(target.as_ref(), Expr::Index { .. }) {
+                    return format!("({}).{property}", expr_alias(target));
+                }
+            }
+            format!("{}[{}]", expr_alias(target), expr_alias(index))
+        }
+        Expr::Slice { target, start, end } => format!(
+            "{}[{}..{}]",
+            expr_alias(target),
+            start.as_deref().map(expr_alias).unwrap_or_default(),
+            end.as_deref().map(expr_alias).unwrap_or_default()
+        ),
+        Expr::PatternPredicate(_) => "expr".into(),
+        Expr::PatternComprehension { .. } => "expr".into(),
+        Expr::Case {
+            scrutinee,
+            arms,
+            default,
+        } => {
+            let mut out = String::from("CASE");
+            if let Some(scrutinee) = scrutinee {
+                out.push(' ');
+                out.push_str(&expr_alias(scrutinee));
+            }
+            for (when_expr, then_expr) in arms {
+                out.push_str(&format!(
+                    " WHEN {} THEN {}",
+                    expr_alias(when_expr),
+                    expr_alias(then_expr)
+                ));
+            }
+            if let Some(default) = default {
+                out.push_str(&format!(" ELSE {}", expr_alias(default)));
+            }
+            out.push_str(" END");
+            out
+        }
+        Expr::UnaryOp { op, expr } => match op {
+            UnaryOp::Not => format!("NOT {}", expr_alias(expr)),
+            UnaryOp::IsNull => format!("{} IS NULL", expr_alias(expr)),
+            UnaryOp::IsNotNull => format!("{} IS NOT NULL", expr_alias(expr)),
+        },
+        Expr::BinaryOp { left, op, right } => {
+            let prec = binary_precedence(*op);
+            format!(
+                "{} {} {}",
+                expr_alias_binary_child(left, prec, false),
+                binary_op_str(*op),
+                expr_alias_binary_child(right, prec, true)
+            )
+        }
         Expr::CountStar => "count(*)".into(),
         Expr::FunctionCall { name, args } => {
+            if name == "__label_test" {
+                if let Some(Expr::Variable(variable)) = args.first() {
+                    let labels = args
+                        .iter()
+                        .skip(1)
+                        .filter_map(|arg| match arg {
+                            Expr::Literal(Literal::String(label)) => Some(format!(":{label}")),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("");
+                    return format!("({variable}{labels})");
+                }
+            }
             if let Some(Expr::FunctionCall {
                 name: marker,
                 args: marker_args,
@@ -1223,7 +2229,86 @@ fn expr_alias(expr: &Expr) -> String {
             let arg_str: Vec<String> = args.iter().map(expr_alias).collect();
             format!("{}({})", name, arg_str.join(", "))
         }
-        _ => "expr".into(),
+        Expr::Parameter(name) => format!("${name}"),
+        Expr::Exists(inner) => format!("EXISTS({})", expr_alias(inner)),
+        Expr::ExistsSubquery(_) => "EXISTS { ... }".into(),
+        Expr::ListPredicate {
+            kind,
+            variable,
+            list,
+            predicate,
+        } => {
+            let name = match kind {
+                ListPredicateKind::Any => "any",
+                ListPredicateKind::All => "ALL",
+                ListPredicateKind::None => "none",
+                ListPredicateKind::Single => "single",
+            };
+            let mut out = format!("{name}({variable} IN {}", expr_alias(list));
+            if let Some(predicate) = predicate {
+                out.push_str(&format!(" WHERE {}", expr_alias(predicate)));
+            }
+            out.push(')');
+            out
+        }
+    }
+}
+
+fn expr_alias_binary_child(expr: &Expr, parent_precedence: u8, right_child: bool) -> String {
+    let child = expr_alias(expr);
+    let Expr::BinaryOp { op, .. } = expr else {
+        return child;
+    };
+    let child_precedence = binary_precedence(*op);
+    if child_precedence < parent_precedence
+        || (right_child && child_precedence == parent_precedence)
+    {
+        format!("({child})")
+    } else {
+        child
+    }
+}
+
+fn binary_precedence(op: BinaryOp) -> u8 {
+    match op {
+        BinaryOp::Or => 1,
+        BinaryOp::Xor => 2,
+        BinaryOp::And => 3,
+        BinaryOp::Eq
+        | BinaryOp::Neq
+        | BinaryOp::Lt
+        | BinaryOp::Lte
+        | BinaryOp::Gt
+        | BinaryOp::Gte
+        | BinaryOp::Contains
+        | BinaryOp::StartsWith
+        | BinaryOp::EndsWith => 4,
+        BinaryOp::Add | BinaryOp::Sub => 5,
+        BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => 6,
+        BinaryOp::Pow => 7,
+    }
+}
+
+fn binary_op_str(op: BinaryOp) -> &'static str {
+    match op {
+        BinaryOp::And => "AND",
+        BinaryOp::Or => "OR",
+        BinaryOp::Xor => "XOR",
+        BinaryOp::Eq => "=",
+        BinaryOp::Neq => "<>",
+        BinaryOp::Lt => "<",
+        BinaryOp::Lte => "<=",
+        BinaryOp::Gt => ">",
+        BinaryOp::Gte => ">=",
+        BinaryOp::Contains => "CONTAINS",
+        BinaryOp::StartsWith => "STARTS WITH",
+        BinaryOp::EndsWith => "ENDS WITH",
+        BinaryOp::Add => "+",
+        BinaryOp::Sub => "-",
+        BinaryOp::Mul => "*",
+        BinaryOp::Div => "/",
+        BinaryOp::Mod => "%",
+        BinaryOp::Pow => "^",
     }
 }
 
@@ -1369,11 +2454,49 @@ mod tests {
     }
 
     #[test]
+    fn plan_keeps_relationship_function_predicate_above_expand() {
+        let q = Parser::parse_read("MATCH (n)-[r]->(x) WHERE type(r) = 'KNOWS' RETURN x").unwrap();
+        let plan = plan_query(&q).unwrap();
+
+        if let LogicalPlan::Project { input, .. } = plan {
+            if let LogicalPlan::Filter { input, .. } = *input {
+                if matches!(*input, LogicalPlan::Expand { .. }) {
+                    return;
+                }
+            }
+        }
+        panic!("expected relationship function predicate to remain above Expand");
+    }
+
+    #[test]
+    fn plan_fuses_optional_match_where_into_apply_match() {
+        let q = Parser::parse_read(
+            "MATCH (a:Entity) OPTIONAL MATCH (a)-[:DISCLOSES]->(b) WHERE b.name = 'Revenue' RETURN a, b",
+        )
+        .unwrap();
+        let plan = plan_query(&q).unwrap();
+
+        if let LogicalPlan::Project { input, .. } = plan {
+            if let LogicalPlan::ApplyMatch {
+                optional,
+                where_predicate,
+                ..
+            } = *input
+            {
+                assert!(optional);
+                assert!(where_predicate.is_some());
+                return;
+            }
+        }
+        panic!("expected OPTIONAL MATCH WHERE to be fused into ApplyMatch");
+    }
+
+    #[test]
     fn plan_with_limit() {
         let q = Parser::parse_read("MATCH (n) RETURN n LIMIT 10").unwrap();
         let plan = plan_query(&q).unwrap();
         if let LogicalPlan::Limit { count, .. } = plan {
-            assert_eq!(count, 10);
+            assert_eq!(count, RowCount::Literal(10));
         } else {
             panic!("expected Limit");
         }
@@ -1383,12 +2506,14 @@ mod tests {
     fn plan_aggregate() {
         let q = Parser::parse_read("MATCH (n:Entity) RETURN count(n)").unwrap();
         let plan = plan_query(&q).unwrap();
-        if let LogicalPlan::Aggregate { aggregations, .. } = plan {
-            assert_eq!(aggregations.len(), 1);
-            assert_eq!(aggregations[0].function, "count");
-        } else {
-            panic!("expected Aggregate");
+        if let LogicalPlan::Project { input, .. } = plan {
+            if let LogicalPlan::Aggregate { aggregations, .. } = *input {
+                assert_eq!(aggregations.len(), 1);
+                assert_eq!(aggregations[0].function, "count");
+                return;
+            }
         }
+        panic!("expected Project -> Aggregate");
     }
 
     fn into_write(input: &str) -> WriteQuery {
@@ -1445,10 +2570,13 @@ mod tests {
         let wp = plan_write(&wq).unwrap();
         assert!(wp.source.is_some());
         assert_eq!(wp.mutations.len(), 1);
-        let MutationOp::Delete { variable, detach } = &wp.mutations[0] else {
+        let MutationOp::Delete {
+            variable, detach, ..
+        } = &wp.mutations[0]
+        else {
             panic!("expected Delete");
         };
-        assert_eq!(variable, "n");
+        assert_eq!(variable.as_deref(), Some("n"));
         assert!(!detach);
     }
 
@@ -1494,17 +2622,22 @@ mod tests {
     fn plan_merge_node() {
         let wq = into_write("MERGE (n:Entity {name: 'Alice'})");
         let wp = plan_write(&wq).unwrap();
+        assert!(matches!(wp.mutations[0], MutationOp::BeginMerge));
         let MutationOp::MergeNode {
             variable,
             labels,
             properties,
-        } = &wp.mutations[0]
+        } = &wp.mutations[1]
         else {
             panic!("expected MergeNode");
         };
         assert_eq!(variable, "n");
         assert_eq!(labels, &vec!["Entity".to_string()]);
         assert_eq!(properties.len(), 1);
+        assert!(matches!(
+            wp.mutations[2],
+            MutationOp::ApplyMergeActions { .. }
+        ));
     }
 
     #[test]

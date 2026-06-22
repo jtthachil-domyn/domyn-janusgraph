@@ -8,12 +8,13 @@
 //!   cargo test -p nexus-cypher --test tck_runner -- --nocapture
 //!
 //! Set `TCK_CATEGORY=clauses/with` to filter to a single subtree while
-//! iterating on a feature area.
+//! iterating on a feature area. Set `TCK_FEATURE_ROOT=/path/to/features` to
+//! run against a different openCypher feature corpus.
 
 #![allow(clippy::too_many_lines)]
 
 use serde::Serialize;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -32,6 +33,10 @@ struct Scenario {
     params: BTreeMap<String, String>,
     query: Option<String>,
     expected: Option<Expected>,
+    control_query: Option<String>,
+    control_expected: Option<Expected>,
+    expected_side_effects: Option<BTreeMap<String, i64>>,
+    tags: Vec<String>,
     skipped_reason: Option<&'static str>,
     outline: bool,
     examples: Vec<BTreeMap<String, String>>,
@@ -52,6 +57,7 @@ enum Expected {
         columns: Vec<String>,
         rows: Vec<Vec<String>>,
         ordered: bool,
+        unordered_list_elements: bool,
     },
     Error {
         description: String,
@@ -64,9 +70,8 @@ struct Stats {
     skipped: usize,   // unsupported step types (error expectation, fixtures, etc.)
     parse_ok: usize,  // setup + query both parsed
     exec_ok: usize,   // executed without error
-    result_ok: usize, // result matched expected (primitive cells only)
+    result_ok: usize, // result matched expected
     result_mismatch: usize, // parsed+executed, expected primitive cells, result wrong
-    vertex_results: usize, // expected contains node/edge literals — not yet compared
     exec_err: usize,  // parsed but execution errored
     parse_err: usize, // parser rejected
     expected_error_ok: usize, // query failed as requested by a TCK error scenario
@@ -75,9 +80,15 @@ struct Stats {
 const TCK_ROOT_REL: &str = "../../references/falkordb/tests/tck/features";
 static DEBUG_MISMATCH_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-fn tck_root() -> PathBuf {
+fn default_tck_root() -> PathBuf {
     let manifest = env!("CARGO_MANIFEST_DIR");
     PathBuf::from(manifest).join(TCK_ROOT_REL)
+}
+
+fn tck_root() -> PathBuf {
+    std::env::var("TCK_FEATURE_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| default_tck_root())
 }
 
 fn discover_feature_files(root: &Path, filter: Option<&str>) -> Vec<PathBuf> {
@@ -107,9 +118,19 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
 /// Minimal Gherkin parser: extract Scenarios with their step lines and expand
 /// Scenario Outline / Examples tables into executable scenario instances.
 fn parse_feature(contents: &str) -> Vec<Scenario> {
+    parse_feature_with_options(contents, ParseFeatureOptions::default())
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ParseFeatureOptions {
+    include_upstream_skipped_tags: bool,
+}
+
+fn parse_feature_with_options(contents: &str, options: ParseFeatureOptions) -> Vec<Scenario> {
     let mut scenarios = Vec::new();
     let mut current: Option<Scenario> = None;
     let mut background = Scenario::default();
+    let mut pending_tags = Vec::new();
     let mut in_background = false;
     let mut in_docstring = false;
     let mut docstring_target: Option<DocstringTarget> = None;
@@ -117,6 +138,7 @@ fn parse_feature(contents: &str) -> Vec<Scenario> {
     let mut in_table = false;
     let mut pending_table: Option<TableTarget> = None;
     let mut table_rows: Vec<Vec<String>> = Vec::new();
+    let mut result_target = ResultTarget::Main;
 
     for raw_line in contents.lines() {
         let line = raw_line.trim_end();
@@ -155,7 +177,7 @@ fn parse_feature(contents: &str) -> Vec<Scenario> {
             let cells: Vec<String> = trimmed
                 .trim_matches('|')
                 .split('|')
-                .map(|c| c.trim().to_string())
+                .map(|c| unescape_gherkin_table_cell(c.trim()))
                 .collect();
             table_rows.push(cells);
             continue;
@@ -174,6 +196,17 @@ fn parse_feature(contents: &str) -> Vec<Scenario> {
                 push_scenario(&mut scenarios, sc);
             }
             in_background = true;
+            pending_tags.clear();
+            continue;
+        }
+
+        if trimmed.starts_with('@') {
+            pending_tags.extend(
+                trimmed
+                    .split_whitespace()
+                    .filter(|tag| tag.starts_with('@'))
+                    .map(str::to_string),
+            );
             continue;
         }
 
@@ -192,8 +225,12 @@ fn parse_feature(contents: &str) -> Vec<Scenario> {
             sc.name = name;
             sc.outline = false;
             sc.examples.clear();
+            sc.tags = std::mem::take(&mut pending_tags);
             if trimmed.starts_with("Scenario Outline:") {
                 sc.outline = true;
+            }
+            if has_skip_tag(&sc.tags) && !options.include_upstream_skipped_tags {
+                sc.skipped_reason = Some("scenario tagged skip");
             }
             current = Some(sc);
             continue;
@@ -221,11 +258,23 @@ fn parse_feature(contents: &str) -> Vec<Scenario> {
                 _ => sc.skipped_reason = Some("unsupported Given"),
             }
         } else if let Some(rest) = trimmed.strip_prefix("And ") {
-            handle_and_or_when(sc, rest, &mut docstring_target, &mut pending_table);
+            handle_and_or_when(
+                sc,
+                rest,
+                &mut docstring_target,
+                &mut pending_table,
+                &mut result_target,
+            );
         } else if let Some(rest) = trimmed.strip_prefix("When ") {
-            handle_and_or_when(sc, rest, &mut docstring_target, &mut pending_table);
+            handle_and_or_when(
+                sc,
+                rest,
+                &mut docstring_target,
+                &mut pending_table,
+                &mut result_target,
+            );
         } else if let Some(rest) = trimmed.strip_prefix("Then ") {
-            handle_then(sc, rest, &mut pending_table);
+            handle_then(sc, rest, &mut pending_table, result_target);
         } else if trimmed.starts_with("Examples:") {
             pending_table = Some(TableTarget::Examples);
         }
@@ -246,9 +295,37 @@ fn parse_feature(contents: &str) -> Vec<Scenario> {
     scenarios
 }
 
+fn unescape_gherkin_table_cell(cell: &str) -> String {
+    let mut out = String::with_capacity(cell.len());
+    let mut chars = cell.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('|') => out.push('|'),
+            Some('\\') => out.push('\\'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone, Copy)]
 enum TableTarget {
-    Expected { ordered: bool },
+    Expected {
+        ordered: bool,
+        unordered_list_elements: bool,
+        target: ResultTarget,
+    },
+    SideEffects,
     Examples,
     Parameters,
 }
@@ -257,6 +334,13 @@ enum TableTarget {
 enum DocstringTarget {
     Setup,
     Query,
+    ControlQuery,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResultTarget {
+    Main,
+    Control,
 }
 
 fn handle_and_or_when(
@@ -264,14 +348,21 @@ fn handle_and_or_when(
     rest: &str,
     docstring_target: &mut Option<DocstringTarget>,
     _pending: &mut Option<TableTarget>,
+    result_target: &mut ResultTarget,
 ) {
     let t = rest.trim();
     if t.starts_with("having executed:") {
         *docstring_target = Some(DocstringTarget::Setup);
     } else if t.starts_with("executing query:") {
         *docstring_target = Some(DocstringTarget::Query);
-    } else if t.starts_with("no side effects") || t.starts_with("the side effects should be") {
-        // side-effect assertions silently ignored
+        *result_target = ResultTarget::Main;
+    } else if t.starts_with("executing control query:") {
+        *docstring_target = Some(DocstringTarget::ControlQuery);
+        *result_target = ResultTarget::Control;
+    } else if t.starts_with("no side effects") {
+        sc.expected_side_effects = Some(BTreeMap::new());
+    } else if t.starts_with("the side effects should be") {
+        *_pending = Some(TableTarget::SideEffects);
     } else if t.starts_with("parameters are") {
         *_pending = Some(TableTarget::Parameters);
     } else if t.starts_with("there exists a procedure") {
@@ -281,20 +372,41 @@ fn handle_and_or_when(
     }
 }
 
-fn handle_then(sc: &mut Scenario, rest: &str, pending_table: &mut Option<TableTarget>) {
+fn handle_then(
+    sc: &mut Scenario,
+    rest: &str,
+    pending_table: &mut Option<TableTarget>,
+    result_target: ResultTarget,
+) {
     let t = rest.trim();
     if t.starts_with("the result should be, in any order:") {
-        *pending_table = Some(TableTarget::Expected { ordered: false });
-    } else if t.starts_with("the result should be, in order:") {
-        *pending_table = Some(TableTarget::Expected { ordered: true });
-    } else if t == "the result should be empty" {
-        sc.expected = Some(Expected::Empty);
-    } else if t.starts_with("the result should be (ignoring element order for lists):") {
-        *pending_table = Some(TableTarget::Expected { ordered: false });
-    } else if t.starts_with("a ") && t.contains("should be raised") {
-        sc.expected = Some(Expected::Error {
-            description: t.to_string(),
+        *pending_table = Some(TableTarget::Expected {
+            ordered: false,
+            unordered_list_elements: false,
+            target: result_target,
         });
+    } else if t.starts_with("the result should be, in order:") {
+        *pending_table = Some(TableTarget::Expected {
+            ordered: true,
+            unordered_list_elements: false,
+            target: result_target,
+        });
+    } else if t == "the result should be empty" {
+        set_expected(sc, result_target, Expected::Empty);
+    } else if t.starts_with("the result should be (ignoring element order for lists):") {
+        *pending_table = Some(TableTarget::Expected {
+            ordered: false,
+            unordered_list_elements: true,
+            target: result_target,
+        });
+    } else if t.starts_with("a ") && t.contains("should be raised") {
+        set_expected(
+            sc,
+            result_target,
+            Expected::Error {
+                description: t.to_string(),
+            },
+        );
     } else {
         sc.skipped_reason = Some("unsupported Then");
     }
@@ -309,18 +421,38 @@ fn flush_table(
         return;
     };
     match target {
-        TableTarget::Expected { ordered } => {
+        TableTarget::Expected {
+            ordered,
+            unordered_list_elements,
+            target,
+        } => {
             if table_rows.is_empty() {
-                sc.expected = Some(Expected::Empty);
+                set_expected(sc, target, Expected::Empty);
             } else {
                 let columns = table_rows[0].clone();
                 let rows = table_rows[1..].to_vec();
-                sc.expected = Some(Expected::Rows {
-                    columns,
-                    rows,
-                    ordered,
-                });
+                set_expected(
+                    sc,
+                    target,
+                    Expected::Rows {
+                        columns,
+                        rows,
+                        ordered,
+                        unordered_list_elements,
+                    },
+                );
             }
+        }
+        TableTarget::SideEffects => {
+            let mut effects = BTreeMap::new();
+            for row in table_rows {
+                if row.len() >= 2 {
+                    let key = row[0].trim().to_string();
+                    let count = row[1].trim().parse::<i64>().unwrap_or(0);
+                    effects.insert(key, count);
+                }
+            }
+            sc.expected_side_effects = Some(effects);
         }
         TableTarget::Examples => {
             if let Some(headers) = table_rows.first() {
@@ -341,6 +473,13 @@ fn flush_table(
                 }
             }
         }
+    }
+}
+
+fn set_expected(sc: &mut Scenario, target: ResultTarget, expected: Expected) {
+    match target {
+        ResultTarget::Main => sc.expected = Some(expected),
+        ResultTarget::Control => sc.control_expected = Some(expected),
     }
 }
 
@@ -380,10 +519,30 @@ fn push_scenario(out: &mut Vec<Scenario>, mut sc: Scenario) {
             .query
             .as_ref()
             .map(|q| substitute_placeholders(q, example));
+        expanded.control_query = expanded
+            .control_query
+            .as_ref()
+            .map(|q| substitute_placeholders(q, example));
         expanded.expected = expanded
             .expected
             .as_ref()
             .map(|expected| substitute_expected(expected, example));
+        expanded.control_expected = expanded
+            .control_expected
+            .as_ref()
+            .map(|expected| substitute_expected(expected, example));
+        expanded.expected_side_effects = expanded.expected_side_effects.as_ref().map(|effects| {
+            effects
+                .iter()
+                .map(|(key, value)| {
+                    let key = substitute_placeholders(key, example);
+                    let value = substitute_placeholders(&value.to_string(), example)
+                        .parse()
+                        .unwrap_or(*value);
+                    (key, value)
+                })
+                .collect()
+        });
         out.push(expanded);
     }
 }
@@ -398,6 +557,7 @@ fn substitute_expected(expected: &Expected, example: &BTreeMap<String, String>) 
             columns,
             rows,
             ordered,
+            unordered_list_elements,
         } => Expected::Rows {
             columns: columns
                 .iter()
@@ -412,6 +572,7 @@ fn substitute_expected(expected: &Expected, example: &BTreeMap<String, String>) 
                 })
                 .collect(),
             ordered: *ordered,
+            unordered_list_elements: *unordered_list_elements,
         },
     }
 }
@@ -429,6 +590,7 @@ fn apply_docstring(sc: &mut Scenario, target: DocstringTarget, text: String) {
     match target {
         DocstringTarget::Setup => sc.setup_queries.push(trimmed),
         DocstringTarget::Query => sc.query = Some(trimmed),
+        DocstringTarget::ControlQuery => sc.control_query = Some(trimmed),
     }
 }
 
@@ -442,6 +604,13 @@ fn contains_placeholder(s: &str) -> bool {
         i += 1;
     }
     false
+}
+
+fn has_skip_tag(tags: &[String]) -> bool {
+    tags.iter().any(|tag| {
+        let normalized = tag.trim_start_matches('@').to_ascii_lowercase();
+        normalized.starts_with("skip") || normalized.starts_with("ignore")
+    })
 }
 
 /// Build an empty schemaless graph. For the TCK runner we pre-register a
@@ -517,16 +686,26 @@ fn add_named_vertex(graph: &mut Graph, label: &str, name: &str) -> nexus_core::t
 }
 
 fn register_properties_for_scenario(graph: &mut Graph, sc: &Scenario) {
+    let mut inferred = BTreeMap::new();
     for query in sc.setup_queries.iter().chain(sc.query.iter()) {
-        for (key, value) in property_literals(query) {
-            let property_type = value_to_property_type(&value);
-            graph.register_vertex_property(&key, property_type, false, false);
-            graph.register_edge_property(&key, property_type, false, false);
+        for (key, property_type) in property_literals(query) {
+            inferred
+                .entry(key)
+                .and_modify(|existing| {
+                    if *existing != property_type {
+                        *existing = PropertyType::Any;
+                    }
+                })
+                .or_insert(property_type);
         }
+    }
+    for (key, property_type) in inferred {
+        graph.register_vertex_property(&key, property_type, false, false);
+        graph.register_edge_property(&key, property_type, false, false);
     }
 }
 
-fn property_literals(query: &str) -> Vec<(String, Value)> {
+fn property_literals(query: &str) -> Vec<(String, PropertyType)> {
     let mut out = Vec::new();
     let bytes = query.as_bytes();
     let mut idx = 0usize;
@@ -539,12 +718,48 @@ fn property_literals(query: &str) -> Vec<(String, Value)> {
             break;
         };
         let map = &query[idx..=end];
-        if let Value::Map(entries) = parse_tck_value(map) {
-            out.extend(entries);
+        for (key, raw_value) in raw_map_entries(map) {
+            out.push((key, property_type_from_literal(raw_value)));
         }
         idx = end + 1;
     }
     out
+}
+
+fn raw_map_entries(map: &str) -> Vec<(String, &str)> {
+    let inner = map.trim().trim_start_matches('{').trim_end_matches('}');
+    if inner.trim().is_empty() {
+        return Vec::new();
+    }
+    split_top_level(inner, ',')
+        .into_iter()
+        .filter_map(|part| {
+            let colon = find_top_level(part, ':')?;
+            let key = parse_map_key(part[..colon].trim());
+            let raw_value = part[colon + 1..].trim();
+            Some((key, raw_value))
+        })
+        .collect()
+}
+
+fn property_type_from_literal(raw: &str) -> PropertyType {
+    let raw = raw.trim();
+    if raw.eq_ignore_ascii_case("true") || raw.eq_ignore_ascii_case("false") {
+        return PropertyType::Bool;
+    }
+    if parse_quoted_string(raw).is_some() {
+        return PropertyType::String;
+    }
+    if raw.eq_ignore_ascii_case("null") || raw.starts_with('[') || raw.starts_with('{') {
+        return PropertyType::Any;
+    }
+    if raw.parse::<i64>().is_ok() {
+        return PropertyType::Int64;
+    }
+    if raw.parse::<f64>().is_ok() {
+        return PropertyType::Float64;
+    }
+    PropertyType::Any
 }
 
 fn find_matching_brace(input: &str, start: usize) -> Option<usize> {
@@ -577,16 +792,6 @@ fn find_matching_brace(input: &str, start: usize) -> Option<usize> {
     None
 }
 
-fn value_to_property_type(value: &Value) -> PropertyType {
-    match value {
-        Value::Bool(_) => PropertyType::Bool,
-        Value::Int64(_) => PropertyType::Int64,
-        Value::Float64(_) => PropertyType::Float64,
-        Value::Bytes(_) => PropertyType::Bytes,
-        _ => PropertyType::String,
-    }
-}
-
 /// Run one scenario. Returns which stats counters to bump.
 fn run_scenario(sc: &Scenario) -> ScenarioOutcome {
     run_scenario_inner(sc)
@@ -600,6 +805,10 @@ fn run_scenario_inner(sc: &Scenario) -> ScenarioOutcome {
     // are not executable Cypher. Skip any query/setup that contains them.
     if sc.setup_queries.iter().any(|q| contains_placeholder(q))
         || sc.query.as_deref().is_some_and(contains_placeholder)
+        || sc
+            .control_query
+            .as_deref()
+            .is_some_and(contains_placeholder)
     {
         return ScenarioOutcome::Skipped;
     }
@@ -612,12 +821,17 @@ fn run_scenario_inner(sc: &Scenario) -> ScenarioOutcome {
     for setup in &sc.setup_queries {
         match run_cypher_mut_in_memory_with_params(setup, &mut graph, params.clone()) {
             Ok(_) => {}
-            Err(_) => return ScenarioOutcome::ParseOrSetupErr,
+            Err(e) => {
+                debug_error(sc, "setup_error", &e.to_string());
+                return ScenarioOutcome::ParseOrSetupErr;
+            }
         }
     }
 
     let query = sc.query.as_deref().unwrap();
-    match run_cypher_mut_in_memory_with_params(query, &mut graph, params) {
+    let before_effects = EffectSnapshot::capture(&graph);
+
+    match run_cypher_mut_in_memory_with_params(query, &mut graph, params.clone()) {
         Err(e) => {
             if matches!(sc.expected, Some(Expected::Error { .. })) {
                 return ScenarioOutcome::ExpectedErrorOk;
@@ -627,27 +841,98 @@ fn run_scenario_inner(sc: &Scenario) -> ScenarioOutcome {
                 || msg.contains("unexpected token")
                 || msg.contains("unknown")
             {
+                debug_error(sc, "parse_error", &msg);
                 ScenarioOutcome::ParseErr
             } else {
+                debug_error(sc, "exec_error", &msg);
                 ScenarioOutcome::ExecErr
             }
         }
         Ok(run_result) => {
             if matches!(sc.expected, Some(Expected::Error { .. })) {
+                debug_expected_error_mismatch(sc, &run_result);
                 return ScenarioOutcome::ResultMismatch;
             }
-            let Some(expected) = sc.expected.as_ref() else {
-                return ScenarioOutcome::ExecOk;
-            };
-            let qr = match run_result {
-                RunResult::Read(qr) => qr,
-                RunResult::Write(_) => {
-                    return ScenarioOutcome::ExecOk;
+            let after_effects = EffectSnapshot::capture(&graph);
+            let effects_ok =
+                compare_side_effects(sc, &before_effects, &after_effects).unwrap_or(true);
+
+            let main_outcome = match (&sc.expected, run_result) {
+                (Some(expected), RunResult::Read(qr)) => {
+                    let mut outcome = compare_result(expected, &qr, &graph);
+                    if matches!(outcome, ScenarioOutcome::ResultOk) && !effects_ok {
+                        outcome = ScenarioOutcome::ResultMismatch;
+                    }
+                    debug_mismatch(sc, expected, &qr, &outcome);
+                    outcome
+                }
+                (Some(Expected::Empty), RunResult::Write(_)) => {
+                    if effects_ok {
+                        ScenarioOutcome::ResultOk
+                    } else {
+                        ScenarioOutcome::ResultMismatch
+                    }
+                }
+                (None, RunResult::Write(_)) if sc.expected_side_effects.is_some() => {
+                    if effects_ok {
+                        ScenarioOutcome::ResultOk
+                    } else {
+                        ScenarioOutcome::ResultMismatch
+                    }
+                }
+                (None, _) => {
+                    debug_uncompared(sc, "no expected rows or side effects");
+                    ScenarioOutcome::ExecOk
+                }
+                _ => {
+                    debug_uncompared(sc, "result type not comparable by current harness");
+                    ScenarioOutcome::ExecOk
                 }
             };
-            let outcome = compare_result(expected, &qr, &graph);
-            debug_mismatch(sc, expected, &qr, &outcome);
-            outcome
+
+            if !matches!(
+                main_outcome,
+                ScenarioOutcome::ResultOk | ScenarioOutcome::ExecOk
+            ) {
+                return main_outcome;
+            }
+
+            let Some(control_query) = sc.control_query.as_deref() else {
+                return main_outcome;
+            };
+            let control_expected = sc.control_expected.as_ref();
+            match run_cypher_mut_in_memory_with_params(control_query, &mut graph, params) {
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("parse error")
+                        || msg.contains("unexpected token")
+                        || msg.contains("unknown")
+                    {
+                        debug_error(sc, "control_parse_error", &msg);
+                        ScenarioOutcome::ParseErr
+                    } else {
+                        debug_error(sc, "control_exec_error", &msg);
+                        ScenarioOutcome::ExecErr
+                    }
+                }
+                Ok(RunResult::Read(qr)) => {
+                    let Some(expected) = control_expected else {
+                        debug_uncompared(sc, "control query has no expected result");
+                        return main_outcome;
+                    };
+                    let outcome = compare_result(expected, &qr, &graph);
+                    debug_mismatch(sc, expected, &qr, &outcome);
+                    if matches!(outcome, ScenarioOutcome::ResultOk) {
+                        ScenarioOutcome::ResultOk
+                    } else {
+                        outcome
+                    }
+                }
+                Ok(run_result) => {
+                    debug_expected_error_mismatch(sc, &run_result);
+                    ScenarioOutcome::ResultMismatch
+                }
+            }
         }
     }
 }
@@ -676,6 +961,58 @@ fn debug_mismatch(
     eprintln!("expected: {expected:?}");
     eprintln!("actual columns: {:?}", actual.columns);
     eprintln!("actual rows: {:?}", actual.rows);
+}
+
+fn debug_expected_error_mismatch(sc: &Scenario, actual: &RunResult) {
+    let Ok(raw_limit) = std::env::var("TCK_DEBUG_EXPECTED_ERRORS") else {
+        return;
+    };
+    let limit = raw_limit.parse::<usize>().unwrap_or(10);
+    let idx = DEBUG_MISMATCH_COUNT.fetch_add(1, Ordering::Relaxed);
+    if idx >= limit {
+        return;
+    }
+    eprintln!(
+        "\n--- TCK expected-error mismatch #{}: {} ---",
+        idx + 1,
+        sc.name
+    );
+    if let Some(query) = &sc.query {
+        eprintln!("query:\n{query}");
+    }
+    eprintln!("actual succeeded: {actual:?}");
+}
+
+fn debug_error(sc: &Scenario, kind: &str, message: &str) {
+    let Ok(raw_limit) = std::env::var("TCK_DEBUG_ERRORS") else {
+        return;
+    };
+    let limit = raw_limit.parse::<usize>().unwrap_or(10);
+    let idx = DEBUG_MISMATCH_COUNT.fetch_add(1, Ordering::Relaxed);
+    if idx >= limit {
+        return;
+    }
+    eprintln!("\n--- TCK {kind} #{}: {} ---", idx + 1, sc.name);
+    if let Some(query) = &sc.query {
+        eprintln!("query:\n{query}");
+    }
+    eprintln!("error: {message}");
+}
+
+fn debug_uncompared(sc: &Scenario, reason: &str) {
+    let Ok(raw_limit) = std::env::var("TCK_DEBUG_UNCOMPARED") else {
+        return;
+    };
+    let limit = raw_limit.parse::<usize>().unwrap_or(10);
+    let idx = DEBUG_MISMATCH_COUNT.fetch_add(1, Ordering::Relaxed);
+    if idx >= limit {
+        return;
+    }
+    eprintln!("\n--- TCK uncompared #{}: {} ---", idx + 1, sc.name);
+    if let Some(query) = &sc.query {
+        eprintln!("query:\n{query}");
+    }
+    eprintln!("reason: {reason}");
 }
 
 fn parse_params(raw: &BTreeMap<String, String>) -> HashMap<String, Value> {
@@ -745,6 +1082,200 @@ fn parse_quoted_string(raw: &str) -> Option<String> {
 
 fn parse_map_key(raw: &str) -> String {
     parse_quoted_string(raw).unwrap_or_else(|| raw.to_string())
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+struct EffectSnapshot {
+    nodes: BTreeSet<u64>,
+    relationships: BTreeSet<u64>,
+    labels: BTreeSet<String>,
+    vertex_labels: BTreeMap<u64, BTreeSet<String>>,
+    properties: BTreeMap<(char, u64, String), Value>,
+}
+
+impl EffectSnapshot {
+    fn capture(graph: &Graph) -> Self {
+        let mut snapshot = Self::default();
+
+        for raw_id in 0..graph.num_vertices() as u64 {
+            let vertex = VertexId(raw_id);
+            let Some(label) = graph.vertex_label(vertex) else {
+                continue;
+            };
+            snapshot.nodes.insert(raw_id);
+            let labels = split_label_set(label).collect::<BTreeSet<_>>();
+            snapshot.labels.extend(labels.iter().cloned());
+            snapshot.vertex_labels.insert(raw_id, labels);
+            for (key, value) in graph.get_vertex_properties(vertex) {
+                snapshot.properties.insert(('v', raw_id, key), value);
+            }
+        }
+
+        for edge in graph.edge_records() {
+            snapshot.relationships.insert(edge.id.0);
+            for (key, value) in edge.properties {
+                snapshot.properties.insert(('e', edge.id.0, key), value);
+            }
+        }
+
+        snapshot
+    }
+
+    fn diff(&self, after: &Self) -> BTreeMap<String, i64> {
+        self.diff_with_delete_fallout(after, false)
+    }
+
+    fn diff_including_delete_fallout(&self, after: &Self) -> BTreeMap<String, i64> {
+        self.diff_with_delete_fallout(after, true)
+    }
+
+    fn diff_with_delete_fallout(
+        &self,
+        after: &Self,
+        include_delete_fallout: bool,
+    ) -> BTreeMap<String, i64> {
+        let mut out = BTreeMap::new();
+        insert_effect(
+            &mut out,
+            "+nodes",
+            after.nodes.difference(&self.nodes).count() as i64,
+        );
+        insert_effect(
+            &mut out,
+            "-nodes",
+            self.nodes.difference(&after.nodes).count() as i64,
+        );
+        insert_effect(
+            &mut out,
+            "+relationships",
+            after.relationships.difference(&self.relationships).count() as i64,
+        );
+        insert_effect(
+            &mut out,
+            "-relationships",
+            self.relationships.difference(&after.relationships).count() as i64,
+        );
+        insert_effect(&mut out, "+labels", self.labels_added(after));
+        let labels_removed = if include_delete_fallout {
+            self.labels.difference(&after.labels).count() as i64
+        } else {
+            self.labels_removed(after)
+        };
+        insert_effect(&mut out, "-labels", labels_removed);
+
+        let mut properties_added = 0;
+        let mut properties_removed = 0;
+        for (key, after_value) in &after.properties {
+            match self.properties.get(key) {
+                None => properties_added += 1,
+                Some(before_value) if before_value != after_value => {
+                    properties_added += 1;
+                    properties_removed += 1;
+                }
+                Some(_) => {}
+            }
+        }
+        for key in self.properties.keys() {
+            if !after.properties.contains_key(key)
+                && (include_delete_fallout || after.entity_is_live(key.0, key.1))
+            {
+                properties_removed += 1;
+            }
+        }
+        insert_effect(&mut out, "+properties", properties_added);
+        insert_effect(&mut out, "-properties", properties_removed);
+
+        out
+    }
+
+    fn labels_added(&self, after: &Self) -> i64 {
+        after.labels.difference(&self.labels).count() as i64
+    }
+
+    fn labels_removed(&self, after: &Self) -> i64 {
+        self.nodes
+            .intersection(&after.nodes)
+            .flat_map(|id| {
+                let before = self.vertex_labels.get(id).into_iter().flatten();
+                let after = after.vertex_labels.get(id).cloned().unwrap_or_default();
+                before
+                    .filter(move |label| !after.contains(*label))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .collect::<BTreeSet<_>>()
+            .len() as i64
+    }
+
+    fn entity_is_live(&self, kind: char, id: u64) -> bool {
+        match kind {
+            'v' => self.nodes.contains(&id),
+            'e' => self.relationships.contains(&id),
+            _ => false,
+        }
+    }
+}
+
+fn split_label_set(label: &str) -> impl Iterator<Item = String> + '_ {
+    label
+        .split(':')
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+}
+
+fn insert_effect(out: &mut BTreeMap<String, i64>, key: &str, value: i64) {
+    if value != 0 {
+        out.insert(key.to_string(), value);
+    }
+}
+
+fn compare_side_effects(
+    sc: &Scenario,
+    before: &EffectSnapshot,
+    after: &EffectSnapshot,
+) -> Option<bool> {
+    let expected = sc.expected_side_effects.as_ref()?;
+    let expected = expected
+        .iter()
+        .filter(|(_, value)| **value != 0)
+        .map(|(key, value)| (key.clone(), *value))
+        .collect::<BTreeMap<_, _>>();
+    let actual = before.diff(after);
+    let alternate = if expected == actual {
+        None
+    } else {
+        Some(before.diff_including_delete_fallout(after))
+    };
+    let ok = expected == actual || alternate.as_ref().is_some_and(|actual| expected == *actual);
+    if !ok {
+        debug_side_effect_mismatch(sc, &expected, &actual);
+    }
+    Some(ok)
+}
+
+fn debug_side_effect_mismatch(
+    sc: &Scenario,
+    expected: &BTreeMap<String, i64>,
+    actual: &BTreeMap<String, i64>,
+) {
+    let Ok(raw_limit) = std::env::var("TCK_DEBUG_MISMATCHES") else {
+        return;
+    };
+    let limit = raw_limit.parse::<usize>().unwrap_or(10);
+    let idx = DEBUG_MISMATCH_COUNT.fetch_add(1, Ordering::Relaxed);
+    if idx >= limit {
+        return;
+    }
+    eprintln!(
+        "\n--- TCK side-effect mismatch #{}: {} ---",
+        idx + 1,
+        sc.name
+    );
+    if let Some(query) = &sc.query {
+        eprintln!("query:\n{query}");
+    }
+    eprintln!("expected side effects: {expected:?}");
+    eprintln!("actual side effects:   {actual:?}");
 }
 
 fn split_top_level(input: &str, delimiter: char) -> Vec<&str> {
@@ -817,7 +1348,6 @@ enum ScenarioOutcome {
     ExecOk,          // ran, no expected or not compared
     ResultOk,        // result matched
     ResultMismatch,  // result differed
-    VertexResults,   // expected contained node/edge literals
     ExpectedErrorOk, // query failed as requested by TCK
 }
 
@@ -838,12 +1368,8 @@ fn compare_result(
             columns,
             rows,
             ordered,
+            unordered_list_elements,
         } => {
-            // Path values are not represented in QueryResult yet. Node and
-            // relationship literals are compared graph-aware below.
-            if rows.iter().flatten().any(|cell| is_path_literal_cell(cell)) {
-                return ScenarioOutcome::VertexResults;
-            }
             if !columns.is_empty() && columns != &actual.columns {
                 return ScenarioOutcome::ResultMismatch;
             }
@@ -854,10 +1380,10 @@ fn compare_result(
                         .iter()
                         .zip(&actual.rows)
                         .all(|(expected_row, actual_row)| {
-                            row_matches(expected_row, actual_row, graph)
+                            row_matches(expected_row, actual_row, graph, *unordered_list_elements)
                         })
             } else {
-                unordered_rows_match(rows, &actual.rows, graph)
+                unordered_rows_match(rows, &actual.rows, graph, *unordered_list_elements)
             };
 
             if rows_match {
@@ -882,7 +1408,7 @@ fn format_value(v: &Value) -> String {
                 f.to_string()
             }
         }
-        Value::String(s) => format!("'{s}'"),
+        Value::String(s) => quote_cypher_string(s),
         Value::Bool(b) => b.to_string(),
         Value::Null => "null".to_string(),
         Value::Bytes(_) => "<bytes>".to_string(),
@@ -900,51 +1426,207 @@ fn format_value(v: &Value) -> String {
     }
 }
 
-fn row_matches(expected: &[String], actual: &[Value], graph: &Graph) -> bool {
+fn quote_cypher_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        match c {
+            '\'' => out.push_str("\\'"),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push('\n'),
+            '\r' => out.push('\r'),
+            '\t' => out.push('\t'),
+            '\u{0008}' => out.push_str("\\b"),
+            '\u{000c}' => out.push_str("\\f"),
+            _ => out.push(c),
+        }
+    }
+    out.push('\'');
+    out
+}
+
+fn row_matches(
+    expected: &[String],
+    actual: &[Value],
+    graph: &Graph,
+    unordered_list_elements: bool,
+) -> bool {
     expected.len() == actual.len()
         && expected
             .iter()
             .zip(actual)
-            .all(|(expected_cell, actual_value)| cell_matches(expected_cell, actual_value, graph))
+            .all(|(expected_cell, actual_value)| {
+                cell_matches_with_options(
+                    expected_cell,
+                    actual_value,
+                    graph,
+                    unordered_list_elements,
+                )
+            })
 }
 
 fn unordered_rows_match(
     expected_rows: &[Vec<String>],
     actual_rows: &[Vec<Value>],
     graph: &Graph,
+    unordered_list_elements: bool,
 ) -> bool {
     if expected_rows.len() != actual_rows.len() {
         return false;
     }
 
-    let mut used = vec![false; actual_rows.len()];
-    for expected in expected_rows {
-        let Some(idx) = actual_rows.iter().enumerate().find_map(|(idx, actual)| {
-            if !used[idx] && row_matches(expected, actual, graph) {
-                Some(idx)
-            } else {
-                None
+    let mut candidates: Vec<(usize, Vec<usize>)> = expected_rows
+        .iter()
+        .enumerate()
+        .map(|(expected_idx, expected)| {
+            let matches = actual_rows
+                .iter()
+                .enumerate()
+                .filter_map(|(actual_idx, actual)| {
+                    row_matches(expected, actual, graph, unordered_list_elements)
+                        .then_some(actual_idx)
+                })
+                .collect::<Vec<_>>();
+            (expected_idx, matches)
+        })
+        .collect();
+
+    if candidates.iter().any(|(_, matches)| matches.is_empty()) {
+        if std::env::var("TCK_DEBUG_MATCH_CANDIDATES").ok().as_deref() == Some("1") {
+            for (expected_idx, matches) in &candidates {
+                if matches.is_empty() {
+                    eprintln!(
+                        "no candidate for expected row #{expected_idx}: {:?}",
+                        expected_rows[*expected_idx]
+                    );
+                }
             }
-        }) else {
-            return false;
-        };
-        used[idx] = true;
+        }
+        return false;
     }
-    true
+
+    candidates.sort_by_key(|(_, matches)| matches.len());
+
+    fn assign_rows(
+        position: usize,
+        candidates: &[(usize, Vec<usize>)],
+        used_actual: &mut [bool],
+    ) -> bool {
+        if position == candidates.len() {
+            return true;
+        }
+
+        for &actual_idx in &candidates[position].1 {
+            if used_actual[actual_idx] {
+                continue;
+            }
+            used_actual[actual_idx] = true;
+            if assign_rows(position + 1, candidates, used_actual) {
+                return true;
+            }
+            used_actual[actual_idx] = false;
+        }
+
+        false
+    }
+
+    let mut used_actual = vec![false; actual_rows.len()];
+    assign_rows(0, &candidates, &mut used_actual)
 }
 
 fn cell_matches(expected: &str, actual: &Value, graph: &Graph) -> bool {
+    cell_matches_with_options(expected, actual, graph, false)
+}
+
+fn cell_matches_with_options(
+    expected: &str,
+    actual: &Value,
+    graph: &Graph,
+    unordered_list_elements: bool,
+) -> bool {
     let expected = expected.trim();
+    if numeric_cell_matches(expected, actual) {
+        return true;
+    }
+    if is_map_literal_cell(expected) {
+        return matches_map_literal(expected, actual, graph);
+    }
     if is_node_literal_cell(expected) {
         return matches_node_literal(expected, actual, graph);
     }
-    if is_relationship_literal_cell(expected) {
-        return matches_relationship_literal(expected, actual, graph);
+    if is_path_list_literal_cell(expected) {
+        return matches_path_list_literal(expected, actual, graph);
+    }
+    if is_path_literal_cell(expected) {
+        return matches_path_literal(expected, actual, graph);
+    }
+    if is_list_literal_cell(expected) {
+        return matches_list_literal_with_options(expected, actual, graph, unordered_list_elements);
+    }
+    if is_node_list_literal_cell(expected) {
+        return matches_node_list_literal(expected, actual, graph);
     }
     if is_relationship_list_literal_cell(expected) {
         return matches_relationship_list_literal(expected, actual, graph);
     }
+    if is_relationship_literal_cell(expected) {
+        return matches_relationship_literal(expected, actual, graph);
+    }
     canonical_cell(expected) == canonical_cell(&format_value(actual))
+}
+
+fn numeric_cell_matches(expected: &str, actual: &Value) -> bool {
+    if let Ok(expected_int) = expected.parse::<i64>() {
+        return matches!(actual, Value::Int64(actual_int) if *actual_int == expected_int);
+    }
+    if let Ok(expected_float) = expected.parse::<f64>() {
+        return match actual {
+            Value::Float64(actual_float) => float_cells_equal(expected_float, *actual_float),
+            Value::Int64(actual_int) => float_cells_equal(expected_float, *actual_int as f64),
+            _ => false,
+        };
+    }
+    false
+}
+
+fn float_cells_equal(left: f64, right: f64) -> bool {
+    if left == right {
+        return true;
+    }
+    let scale = left.abs().max(right.abs()).max(1.0);
+    (left - right).abs() <= f64::EPSILON * scale
+}
+
+fn is_map_literal_cell(cell: &str) -> bool {
+    let cell = cell.trim();
+    cell.starts_with('{') && cell.ends_with('}')
+}
+
+fn matches_map_literal(expected: &str, actual: &Value, graph: &Graph) -> bool {
+    let Value::Map(actual) = actual else {
+        return false;
+    };
+    let inner = expected
+        .trim()
+        .strip_prefix('{')
+        .and_then(|cell| cell.strip_suffix('}'))
+        .unwrap_or(expected.trim());
+    if inner.trim().is_empty() {
+        return actual.is_empty();
+    }
+    let expected_entries = split_top_level(inner, ',');
+    expected_entries.len() == actual.len()
+        && expected_entries.iter().all(|entry| {
+            let Some(colon) = find_top_level(entry, ':') else {
+                return false;
+            };
+            let key = parse_map_key(entry[..colon].trim());
+            let value = entry[colon + 1..].trim();
+            actual
+                .iter()
+                .find(|(actual_key, _)| actual_key == &key)
+                .is_some_and(|(_, actual_value)| cell_matches(value, actual_value, graph))
+        })
 }
 
 fn is_node_literal_cell(cell: &str) -> bool {
@@ -954,10 +1636,18 @@ fn is_node_literal_cell(cell: &str) -> bool {
 
 fn is_relationship_literal_cell(cell: &str) -> bool {
     let cell = cell.trim();
+    if cell.starts_with("[<") {
+        return false;
+    }
+    if cell.starts_with("[(") {
+        return false;
+    }
     cell.starts_with("[:")
         || (cell.starts_with('[')
             && cell.ends_with(']')
             && !cell.starts_with("[[")
+            && !cell.starts_with("['")
+            && !cell.starts_with("[\"")
             && cell.contains(':')
             && !cell.contains(','))
 }
@@ -967,36 +1657,69 @@ fn is_relationship_list_literal_cell(cell: &str) -> bool {
     cell.starts_with("[[") && cell.ends_with("]]") && cell.contains("[:")
 }
 
+fn is_node_list_literal_cell(cell: &str) -> bool {
+    let cell = cell.trim();
+    cell.starts_with("[(") && cell.ends_with(")]") && cell.contains("(:")
+}
+
+fn is_list_literal_cell(cell: &str) -> bool {
+    let cell = cell.trim();
+    cell.starts_with('[') && cell.ends_with(']') && !is_relationship_literal_cell(cell)
+}
+
 fn is_path_literal_cell(cell: &str) -> bool {
     let cell = cell.trim();
-    cell.contains("-[") || cell.contains("]->") || cell.contains("<-[")
+    cell.starts_with('<') && cell.ends_with('>')
+}
+
+fn is_path_list_literal_cell(cell: &str) -> bool {
+    let cell = cell.trim();
+    cell.starts_with("[<") && cell.ends_with(">]")
 }
 
 fn matches_node_literal(expected: &str, actual: &Value, graph: &Graph) -> bool {
-    let Value::Int64(id) = actual else {
+    let Some(vertex) = actual_vertex_id(actual) else {
         return false;
     };
-    let vertex = VertexId(*id as u64);
     let Some(actual_label) = graph.vertex_label(vertex) else {
         return false;
     };
+    let actual_labels: Vec<&str> = actual_label
+        .split(':')
+        .filter(|part| !part.is_empty())
+        .collect();
     let inner = expected
         .trim()
         .trim_start_matches('(')
         .trim_end_matches(')')
         .trim();
     let (labels, props) = parse_graph_literal_parts(inner);
-    if !labels.is_empty() && !labels.iter().any(|label| label == actual_label) {
+    if !labels.is_empty()
+        && !labels
+            .iter()
+            .all(|label| actual_labels.iter().any(|actual| actual == label))
+    {
         return false;
     }
     props_match(&props, &graph.get_vertex_properties(vertex))
 }
 
+fn actual_vertex_id(actual: &Value) -> Option<VertexId> {
+    match actual {
+        Value::Int64(id) => Some(VertexId(*id as u64)),
+        Value::Map(entries) => entries
+            .iter()
+            .find(|(key, _)| key == "__vertex_id")
+            .and_then(|(_, value)| value.as_i64())
+            .map(|id| VertexId(id as u64)),
+        _ => None,
+    }
+}
+
 fn matches_relationship_literal(expected: &str, actual: &Value, graph: &Graph) -> bool {
-    let Value::Int64(id) = actual else {
+    let Some(edge) = actual_edge_id(actual) else {
         return false;
     };
-    let edge = EdgeId(*id as u64);
     let Some(actual_label) = graph.edge_label(edge) else {
         return false;
     };
@@ -1012,14 +1735,27 @@ fn matches_relationship_literal(expected: &str, actual: &Value, graph: &Graph) -
     props_match(&props, &graph.get_edge_properties(edge))
 }
 
+fn actual_edge_id(actual: &Value) -> Option<EdgeId> {
+    match actual {
+        Value::Int64(id) => Some(EdgeId(*id as u64)),
+        Value::Map(entries) => entries
+            .iter()
+            .find(|(key, _)| key == "__edge_id")
+            .and_then(|(_, value)| value.as_i64())
+            .map(|id| EdgeId(id as u64)),
+        _ => None,
+    }
+}
+
 fn matches_relationship_list_literal(expected: &str, actual: &Value, graph: &Graph) -> bool {
     let Value::List(items) = actual else {
         return false;
     };
     let inner = expected
         .trim()
-        .trim_start_matches('[')
-        .trim_end_matches(']');
+        .strip_prefix('[')
+        .and_then(|cell| cell.strip_suffix(']'))
+        .unwrap_or(expected.trim());
     if inner.trim().is_empty() {
         return items.is_empty();
     }
@@ -1031,6 +1767,214 @@ fn matches_relationship_list_literal(expected: &str, actual: &Value, graph: &Gra
             .all(|(expected_item, actual_item)| {
                 matches_relationship_literal(expected_item, actual_item, graph)
             })
+}
+
+fn matches_list_literal_with_options(
+    expected: &str,
+    actual: &Value,
+    graph: &Graph,
+    unordered_list_elements: bool,
+) -> bool {
+    let Value::List(items) = actual else {
+        return false;
+    };
+    let inner = expected
+        .trim()
+        .strip_prefix('[')
+        .and_then(|cell| cell.strip_suffix(']'))
+        .unwrap_or(expected.trim());
+    if inner.trim().is_empty() {
+        return items.is_empty();
+    }
+    let expected_items = split_top_level(inner, ',');
+    if expected_items.len() != items.len() {
+        return false;
+    }
+    if unordered_list_elements {
+        return unordered_list_items_match(&expected_items, items, graph);
+    }
+    expected_items
+        .iter()
+        .zip(items)
+        .all(|(expected_item, actual_item)| {
+            cell_matches_with_options(expected_item, actual_item, graph, unordered_list_elements)
+        })
+}
+
+fn unordered_list_items_match(
+    expected_items: &[&str],
+    actual_items: &[Value],
+    graph: &Graph,
+) -> bool {
+    let mut used = vec![false; actual_items.len()];
+    'expected: for expected_item in expected_items {
+        for (idx, actual_item) in actual_items.iter().enumerate() {
+            if used[idx] {
+                continue;
+            }
+            if cell_matches_with_options(expected_item, actual_item, graph, true) {
+                used[idx] = true;
+                continue 'expected;
+            }
+        }
+        return false;
+    }
+    true
+}
+
+fn matches_node_list_literal(expected: &str, actual: &Value, graph: &Graph) -> bool {
+    let Value::List(items) = actual else {
+        return false;
+    };
+    let inner = expected
+        .trim()
+        .strip_prefix('[')
+        .and_then(|cell| cell.strip_suffix(']'))
+        .unwrap_or(expected.trim());
+    if inner.trim().is_empty() {
+        return items.is_empty();
+    }
+    let expected_items = split_top_level(inner, ',');
+    expected_items.len() == items.len()
+        && expected_items
+            .iter()
+            .zip(items)
+            .all(|(expected_item, actual_item)| {
+                matches_node_literal(expected_item, actual_item, graph)
+            })
+}
+
+fn matches_path_list_literal(expected: &str, actual: &Value, graph: &Graph) -> bool {
+    let Value::List(items) = actual else {
+        return false;
+    };
+    let inner = expected
+        .trim()
+        .strip_prefix('[')
+        .and_then(|cell| cell.strip_suffix(']'))
+        .unwrap_or(expected.trim());
+    if inner.trim().is_empty() {
+        return items.is_empty();
+    }
+    let expected_items = split_top_level(inner, ',');
+    expected_items.len() == items.len()
+        && expected_items
+            .iter()
+            .zip(items)
+            .all(|(expected_item, actual_item)| {
+                matches_path_literal(expected_item, actual_item, graph)
+            })
+}
+
+fn matches_path_literal(expected: &str, actual: &Value, graph: &Graph) -> bool {
+    let Some((actual_nodes, actual_edges)) = path_components(actual) else {
+        return false;
+    };
+    let Some((expected_nodes, expected_edges)) = parse_path_literal(expected) else {
+        return false;
+    };
+    expected_nodes.len() == actual_nodes.len()
+        && expected_edges.len() == actual_edges.len()
+        && expected_nodes
+            .iter()
+            .zip(actual_nodes)
+            .all(|(expected_node, actual_node)| {
+                matches_node_literal(expected_node, actual_node, graph)
+            })
+        && expected_edges
+            .iter()
+            .zip(actual_edges)
+            .all(|(expected_edge, actual_edge)| {
+                matches_relationship_literal(expected_edge, actual_edge, graph)
+            })
+}
+
+fn path_components(value: &Value) -> Option<(&[Value], &[Value])> {
+    let Value::Map(entries) = value else {
+        return None;
+    };
+    let nodes = entries.iter().find_map(|(key, value)| {
+        if key == "__path_nodes" {
+            if let Value::List(values) = value {
+                Some(values.as_slice())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    })?;
+    let edges = entries.iter().find_map(|(key, value)| {
+        if key == "__path_edges" {
+            if let Value::List(values) = value {
+                Some(values.as_slice())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    })?;
+    Some((nodes, edges))
+}
+
+fn parse_path_literal(expected: &str) -> Option<(Vec<String>, Vec<String>)> {
+    let inner = expected.trim().strip_prefix('<')?.strip_suffix('>')?.trim();
+    if inner.is_empty() {
+        return Some((Vec::new(), Vec::new()));
+    }
+
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    let chars: Vec<char> = inner.chars().collect();
+    let mut idx = 0usize;
+    while idx < chars.len() {
+        match chars[idx] {
+            '(' => {
+                let end = find_balanced_char(&chars, idx, '(', ')')?;
+                nodes.push(chars[idx..=end].iter().collect());
+                idx = end + 1;
+            }
+            '[' => {
+                let end = find_balanced_char(&chars, idx, '[', ']')?;
+                edges.push(chars[idx..=end].iter().collect());
+                idx = end + 1;
+            }
+            _ => idx += 1,
+        }
+    }
+    Some((nodes, edges))
+}
+
+fn find_balanced_char(chars: &[char], start: usize, open: char, close: char) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut prev_escape = false;
+    for idx in start..chars.len() {
+        let ch = chars[idx];
+        if in_string {
+            if ch == '\'' && !prev_escape {
+                in_string = false;
+            }
+            prev_escape = ch == '\\' && !prev_escape;
+            if ch != '\\' {
+                prev_escape = false;
+            }
+            continue;
+        }
+        match ch {
+            '\'' => in_string = true,
+            c if c == open => depth += 1,
+            c if c == close => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(idx);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn parse_graph_literal_parts(inner: &str) -> (Vec<String>, Vec<(String, Value)>) {
@@ -1104,9 +2048,9 @@ fn canonical_cell(cell: &str) -> String {
     out
 }
 
-fn category_of(path: &Path) -> String {
+fn category_of(root: &Path, path: &Path) -> String {
     // e.g. .../features/clauses/match/Match1.feature -> "clauses/match"
-    let rel = path.strip_prefix(tck_root()).unwrap_or(path);
+    let rel = path.strip_prefix(root).unwrap_or(path);
     let comps: Vec<&str> = rel
         .components()
         .filter_map(|c| c.as_os_str().to_str())
@@ -1129,6 +2073,7 @@ fn tck_report() {
         return;
     }
     let filter = std::env::var("TCK_CATEGORY").ok();
+    let include_upstream_skipped_tags = env_flag("TCK_INCLUDE_UPSTREAM_SKIPPED");
     let features = discover_feature_files(&root, filter.as_deref());
 
     let mut per_category: BTreeMap<String, Stats> = BTreeMap::new();
@@ -1138,8 +2083,13 @@ fn tck_report() {
         let Ok(contents) = fs::read_to_string(path) else {
             continue;
         };
-        let scenarios = parse_feature(&contents);
-        let cat = category_of(path);
+        let scenarios = parse_feature_with_options(
+            &contents,
+            ParseFeatureOptions {
+                include_upstream_skipped_tags,
+            },
+        );
+        let cat = category_of(&root, path);
         let entry = per_category.entry(cat).or_default();
 
         for sc in &scenarios {
@@ -1186,14 +2136,6 @@ fn tck_report() {
                     totals.exec_ok += 1;
                     totals.result_mismatch += 1;
                 }
-                ScenarioOutcome::VertexResults => {
-                    entry.parse_ok += 1;
-                    entry.exec_ok += 1;
-                    entry.vertex_results += 1;
-                    totals.parse_ok += 1;
-                    totals.exec_ok += 1;
-                    totals.vertex_results += 1;
-                }
                 ScenarioOutcome::ExpectedErrorOk => {
                     entry.result_ok += 1;
                     entry.expected_error_ok += 1;
@@ -1204,12 +2146,58 @@ fn tck_report() {
         }
     }
 
-    print_report(&per_category, &totals);
+    let considered = totals.total - totals.skipped;
+    print_report(
+        &per_category,
+        &totals,
+        considered,
+        &root,
+        filter.as_deref(),
+        include_upstream_skipped_tags,
+    );
+    assert_expected_count("TCK_EXPECT_TOTAL", totals.total);
+    assert_expected_count("TCK_EXPECT_CONSIDERED", considered);
 }
 
-fn print_report(per_category: &BTreeMap<String, Stats>, totals: &Stats) {
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+fn assert_expected_count(env_name: &str, actual: usize) {
+    let Ok(raw) = std::env::var(env_name) else {
+        return;
+    };
+    let expected = raw
+        .parse::<usize>()
+        .unwrap_or_else(|err| panic!("{env_name} must be an integer, got {raw:?}: {err}"));
+    assert_eq!(
+        actual, expected,
+        "{env_name} expected {expected} but TCK runner measured {actual}"
+    );
+}
+
+fn print_report(
+    per_category: &BTreeMap<String, Stats>,
+    totals: &Stats,
+    considered: usize,
+    root: &Path,
+    category_filter: Option<&str>,
+    include_upstream_skipped_tags: bool,
+) {
     eprintln!();
     eprintln!("=== openCypher TCK report — nexus-cypher ===");
+    eprintln!("feature root: {}", root.display());
+    if let Some(filter) = category_filter {
+        eprintln!("category filter: {filter}");
+    }
+    if include_upstream_skipped_tags {
+        eprintln!("mode: experimental, upstream @skip/@ignore tags included");
+    }
     eprintln!();
     eprintln!(
         "{:<30} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6}",
@@ -1254,7 +2242,6 @@ fn print_report(per_category: &BTreeMap<String, Stats>, totals: &Stats) {
         totals.expected_error_ok,
         totals.result_ok,
     );
-    let considered = totals.total - totals.skipped;
     if considered > 0 {
         let pct = |n: usize| (n * 100) as f64 / considered as f64;
         eprintln!();
@@ -1265,17 +2252,22 @@ fn print_report(per_category: &BTreeMap<String, Stats>, totals: &Stats) {
             pct(totals.exec_ok),
             pct(totals.result_ok),
         );
-        eprintln!(
-            "note: {} scenarios had node/edge literals in expected output (not yet compared)",
-            totals.vertex_results,
-        );
     }
-    print_json_report(per_category, totals, considered);
+    print_json_report(
+        per_category,
+        totals,
+        considered,
+        root,
+        category_filter,
+        include_upstream_skipped_tags,
+    );
     eprintln!();
 }
 
 #[derive(Debug, Serialize)]
 struct TckJsonReport<'a> {
+    corpus: TckCorpusReport,
+    include_upstream_skipped_tags: bool,
     total: usize,
     considered: usize,
     skipped: usize,
@@ -1289,6 +2281,13 @@ struct TckJsonReport<'a> {
     rates: TckRates,
     by_category: &'a BTreeMap<String, Stats>,
     top_failure_buckets: Vec<FailureBucket>,
+}
+
+#[derive(Debug, Serialize)]
+struct TckCorpusReport {
+    scope: String,
+    feature_root: String,
+    category_filter: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1307,7 +2306,14 @@ struct FailureBucket {
     result_mismatch: usize,
 }
 
-fn print_json_report(per_category: &BTreeMap<String, Stats>, totals: &Stats, considered: usize) {
+fn print_json_report(
+    per_category: &BTreeMap<String, Stats>,
+    totals: &Stats,
+    considered: usize,
+    root: &Path,
+    category_filter: Option<&str>,
+    include_upstream_skipped_tags: bool,
+) {
     let rate = |n: usize| {
         if considered == 0 {
             0.0
@@ -1335,6 +2341,12 @@ fn print_json_report(per_category: &BTreeMap<String, Stats>, totals: &Stats, con
     top_failure_buckets.truncate(10);
 
     let report = TckJsonReport {
+        corpus: TckCorpusReport {
+            scope: tck_scope_name(root, include_upstream_skipped_tags),
+            feature_root: root.display().to_string(),
+            category_filter: category_filter.map(str::to_string),
+        },
+        include_upstream_skipped_tags,
         total: totals.total,
         considered,
         skipped: totals.skipped,
@@ -1362,4 +2374,137 @@ fn print_json_report(per_category: &BTreeMap<String, Stats>, totals: &Stats, con
             serde_json::to_string_pretty(&report).expect("TCK JSON report should serialize");
         fs::write(path, pretty).expect("TCK_JSON_OUT should be writable");
     }
+}
+
+fn tck_scope_name(root: &Path, include_upstream_skipped_tags: bool) -> String {
+    if let Ok(scope) = std::env::var("TCK_SCOPE") {
+        return scope;
+    }
+    if std::env::var("TCK_FEATURE_ROOT").is_ok() {
+        return "custom".to_string();
+    }
+    if include_upstream_skipped_tags {
+        "checked-in-falkor-skipped-inclusive".to_string()
+    } else if root == default_tck_root().as_path() {
+        "checked-in-falkor".to_string()
+    } else {
+        "custom".to_string()
+    }
+}
+
+#[test]
+fn unordered_rows_match_handles_subset_label_literals() {
+    let mut graph = Graph::new(8, 8);
+    let abc = graph.add_vertex("A:B:C");
+    let ab = graph.add_vertex("A:B");
+    graph.build();
+
+    let expected = vec![vec!["(:A:B)".to_string()], vec!["(:A:B:C)".to_string()]];
+    let actual = vec![
+        vec![Value::Int64(abc.0 as i64)],
+        vec![Value::Int64(ab.0 as i64)],
+    ];
+
+    assert!(unordered_rows_match(&expected, &actual, &graph, false));
+}
+
+#[test]
+fn cell_matches_path_and_path_list_literals() {
+    let mut graph = Graph::new(8, 8);
+    let a = graph.add_vertex("A");
+    let b = graph.add_vertex("B");
+    let edge = graph.add_edge(a, b, "R");
+    graph.build();
+
+    let path = Value::Map(vec![
+        (
+            "__path_nodes".into(),
+            Value::List(vec![Value::Int64(a.0 as i64), Value::Int64(b.0 as i64)]),
+        ),
+        (
+            "__path_edges".into(),
+            Value::List(vec![Value::Int64(edge.0 as i64)]),
+        ),
+    ]);
+
+    assert!(cell_matches("<(:A)-[:R]->(:B)>", &path, &graph));
+    assert!(cell_matches(
+        "[<(:A)-[:R]->(:B)>]",
+        &Value::List(vec![path]),
+        &graph
+    ));
+}
+
+#[test]
+fn cell_matches_node_and_relationship_list_literals() {
+    let mut graph = Graph::new(8, 8);
+    graph.register_vertex_property("name", PropertyType::String, false, false);
+    graph.register_edge_property("name", PropertyType::String, false, false);
+    let a = graph.add_vertex("A");
+    graph.set_vertex_property(a, "name", Value::String("a".into()));
+    let b = graph.add_vertex("B");
+    graph.set_vertex_property(b, "name", Value::String("b".into()));
+    let edge = graph.add_edge(a, b, "RA");
+    graph.set_edge_property(edge, "name", Value::String("a".into()));
+    graph.build();
+
+    assert!(cell_matches(
+        "[(:A {name: 'a'}), (:B {name: 'b'})]",
+        &Value::List(vec![Value::Int64(a.0 as i64), Value::Int64(b.0 as i64)]),
+        &graph
+    ));
+    assert!(cell_matches(
+        "[[:RA {name: 'a'}]]",
+        &Value::List(vec![Value::Map(vec![(
+            "__edge_id".into(),
+            Value::Int64(edge.0 as i64)
+        )])]),
+        &graph
+    ));
+}
+
+#[test]
+fn parse_feature_marks_skip_and_ignore_tags_as_skipped() {
+    let scenarios = parse_feature(
+        r#"
+Feature: Skip tags
+
+  @skip
+  Scenario: skipped
+    Given an empty graph
+    When executing query:
+      """
+      RETURN 1
+      """
+    Then the result should be, in any order:
+      | x |
+      | 1 |
+
+  @skipGrammarCheck @ignore
+  Scenario: also skipped
+    Given an empty graph
+    When executing query:
+      """
+      RETURN 2
+      """
+    Then the result should be, in any order:
+      | x |
+      | 2 |
+
+  Scenario: not skipped
+    Given an empty graph
+    When executing query:
+      """
+      RETURN 3 AS x
+      """
+    Then the result should be, in any order:
+      | x |
+      | 3 |
+"#,
+    );
+
+    assert_eq!(scenarios.len(), 3);
+    assert_eq!(scenarios[0].skipped_reason, Some("scenario tagged skip"));
+    assert_eq!(scenarios[1].skipped_reason, Some("scenario tagged skip"));
+    assert_eq!(scenarios[2].skipped_reason, None);
 }
